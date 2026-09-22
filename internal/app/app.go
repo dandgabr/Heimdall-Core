@@ -22,10 +22,12 @@ import (
 	"github.com/dandgabr/heimdall-core/internal/config"
 	"github.com/dandgabr/heimdall-core/internal/contracts"
 	"github.com/dandgabr/heimdall-core/internal/domain"
+	"github.com/dandgabr/heimdall-core/internal/gates"
 	"github.com/dandgabr/heimdall-core/internal/i18n"
 	"github.com/dandgabr/heimdall-core/internal/importers"
 	"github.com/dandgabr/heimdall-core/internal/observability"
 	"github.com/dandgabr/heimdall-core/internal/passthrough"
+	"github.com/dandgabr/heimdall-core/internal/pipeline"
 	"github.com/dandgabr/heimdall-core/internal/providers"
 	"github.com/dandgabr/heimdall-core/internal/secret"
 	"github.com/dandgabr/heimdall-core/internal/store"
@@ -44,9 +46,12 @@ type App struct {
 	Credentials *store.CredentialStore
 	Providers   *providers.Registry
 	Flows       *auth.FlowFactory
+	// Gates is the frozen gate chain, wired with the F1 logger gate.
+	Gates *pipeline.Chain
 
-	env    map[string]string
-	server *http.Server
+	env         map[string]string
+	server      *http.Server
+	gateRecords []map[string]string
 }
 
 // Options are the inputs to Build.
@@ -59,7 +64,56 @@ type Options struct {
 	// SecretOptions overrides custody resolution. Tests inject a KEK directly;
 	// production leaves it zero so the custody chain runs.
 	SecretOptions *secret.Options
+	// FlowDeps overrides the OAuth client dependencies (HTTP client, clock).
+	// Production leaves it zero; tests inject an httptest-backed client.
+	FlowDeps *oauth.ClientDeps
 }
+
+// appSeams groups the injectable construction steps Build performs. Production
+// uses the defaults; a test swaps one to reach an error branch that a healthy
+// process cannot provoke (e.g. an i18n catalog failure, which the embedded FS
+// makes impossible).
+type appSeams struct {
+	LoadBundle  func() (*i18n.Bundle, error)
+	OpenStore   func(string) (*store.Store, error)
+	EnsureToken func(*store.Store) (string, bool, error)
+	NewChain    func([]contracts.Gate) (*pipeline.Chain, error)
+	NewObserver func(*pipeline.Chain) (*pipeline.Observer, error)
+	// Descriptors supplies the provider descriptors the registry is built from.
+	// It is a seam so a test can feed an invalid or duplicate descriptor and
+	// reach the registry-loop error branches; production uses the fixed set.
+	Descriptors func() map[domain.ProviderID]contracts.ProviderDescriptor
+	// HasCredentials reads whether the vault holds any credential. It is a seam
+	// for the vault-read error branch.
+	HasCredentials func(*store.CredentialStore) (bool, error)
+	// ShutdownServer drains the HTTP server on Run's cancellation. It is a seam
+	// for the shutdown-error branch.
+	ShutdownServer func(*http.Server, context.Context) error
+	// CloseStore releases the store on Close. It is a seam for the
+	// store-close-error branch.
+	CloseStore func(*store.Store) error
+}
+
+var defaultAppSeams = appSeams{
+	LoadBundle:  i18n.New,
+	OpenStore:   store.Open,
+	EnsureToken: func(s *store.Store) (string, bool, error) { return s.EnsureManagementTokenHash() },
+	NewChain:    pipeline.New,
+	NewObserver: pipeline.NewObserver,
+	Descriptors: auth.Descriptors,
+	HasCredentials: func(cs *store.CredentialStore) (bool, error) {
+		creds, err := cs.List(context.Background())
+		if err != nil {
+			return false, err
+		}
+		return len(creds) > 0, nil
+	},
+	ShutdownServer: func(s *http.Server, ctx context.Context) error { return s.Shutdown(ctx) },
+	CloseStore:     func(s *store.Store) error { return s.Close() },
+}
+
+// appSeam is swapped by tests; never mutated in production.
+var appSeam = defaultAppSeams
 
 // Build constructs the application: store, logger, i18n bundle and the HTTP
 // handler graph, without starting the listener.
@@ -69,7 +123,7 @@ func Build(opts Options) (*App, error) {
 		return nil, err
 	}
 
-	bundle, err := i18n.New()
+	bundle, err := appSeam.LoadBundle()
 	if err != nil {
 		return nil, err
 	}
@@ -82,7 +136,7 @@ func Build(opts Options) (*App, error) {
 		Service:  "heimdall",
 	})
 
-	st, err := store.Open(cfg.Store.Path)
+	st, err := appSeam.OpenStore(cfg.Store.Path)
 	if err != nil {
 		return nil, err
 	}
@@ -91,7 +145,7 @@ func Build(opts Options) (*App, error) {
 	// the value nor a recoverable form of it is ever logged: the database stores
 	// only its SHA-256 hash (store.EnsureManagementTokenHash). The i18n message
 	// carries the file path, never the token.
-	token, created, err := st.EnsureManagementTokenHash()
+	token, created, err := appSeam.EnsureToken(st)
 	if err != nil {
 		_ = st.Close()
 		return nil, err
@@ -145,7 +199,7 @@ func (a *App) wireVault(opts Options) error {
 
 	// The provider registry is always available: listing providers needs no key.
 	registry := providers.NewRegistry()
-	for _, desc := range auth.Descriptors() {
+	for _, desc := range appSeam.Descriptors() {
 		family, err := providers.NewOpenAICompat(providers.OpenAICompatOptions{
 			ID:         desc.ID,
 			Descriptor: desc,
@@ -161,10 +215,25 @@ func (a *App) wireVault(opts Options) error {
 	}
 	a.Providers = registry
 
-	// The flow factory needs only HTTP deps; it is not key material.
-	a.Flows = auth.NewFlowFactory(oauth.ClientDeps{Clock: systemClock{}})
+	// The flow factory needs only HTTP deps; it is not key material. Injected
+	// deps (tests) win; production uses the real clock.
+	flowDeps := oauth.ClientDeps{Clock: systemClock{}}
+	if opts.FlowDeps != nil {
+		flowDeps = *opts.FlowDeps
+		if flowDeps.Clock == nil {
+			flowDeps.Clock = systemClock{}
+		}
+	}
+	a.Flows = auth.NewFlowFactory(flowDeps)
 
-	hasCreds, err := a.vaultHasCredentials()
+	// Build the gate chain with the F1 logger gate. Its sink records metadata
+	// for tests and feeds the structured logger in production; it never sees a
+	// body or a header value.
+	if err := a.wireGates(); err != nil {
+		return err
+	}
+
+	hasCreds, err := appSeam.HasCredentials(a.Credentials)
 	if err != nil {
 		return err
 	}
@@ -220,13 +289,10 @@ func (a *App) wireVault(opts Options) error {
 	return nil
 }
 
-// vaultHasCredentials reports whether any credential row exists.
+// vaultHasCredentials reports whether any credential row exists. It uses the
+// seam so the read-error branch is reachable in tests.
 func (a *App) vaultHasCredentials() (bool, error) {
-	creds, err := a.Credentials.List(context.Background())
-	if err != nil {
-		return false, err
-	}
-	return len(creds) > 0, nil
+	return appSeam.HasCredentials(a.Credentials)
 }
 
 // isMissingKey reports whether err is the fail-closed "no master key" error.
@@ -316,12 +382,31 @@ type ProviderStatus struct {
 	ReasonCode string
 }
 
-// Clock exposes the clock the flows use (tests may override).
-func (a *App) SetFlowDeps(deps oauth.ClientDeps) {
-	if a.Flows != nil {
-		a.Flows = auth.NewFlowFactory(deps)
+// wireGates builds the gate chain with the trivial logger gate. The sink keeps
+// a bounded in-memory record for tests and mirrors the metadata to the
+// structured logger, so the gate runs in production and is assertable.
+func (a *App) wireGates() error {
+	loggerGate := gates.NewLogger(func(stage string, fields map[string]string) {
+		record := map[string]string{"stage": stage}
+		for k, v := range fields {
+			record[k] = v
+		}
+		if len(a.gateRecords) < gateRecordCap {
+			a.gateRecords = append(a.gateRecords, record)
+		}
+		a.Logger.Debug("gate."+stage, "fields", record)
+	})
+	chain, err := appSeam.NewChain([]contracts.Gate{loggerGate})
+	if err != nil {
+		return err
 	}
+	a.Gates = chain
+	return nil
 }
+
+// gateRecordCap bounds the in-memory gate record so a long-running daemon does
+// not accumulate unbounded metadata.
+const gateRecordCap = 1024
 
 // contracts assertion: the credential store is usable through the frozen seam.
 var _ contracts.CredentialStore = (*store.CredentialStore)(nil)
@@ -366,10 +451,29 @@ func (a *App) Handler() http.Handler {
 	// envelope every handler uses. RequestID is outside it, so X-Request-ID is
 	// already set when the envelope is written.
 	handler := middleware.ErrorEnvelope(mux)
+
+	// The gate chain observes every request through the metadata-only observer,
+	// outside the mux so a route added later is covered. It is wired here so the
+	// F1 logger gate actually runs in production, not only in tests.
+	if a.Gates != nil {
+		if observer, err := appSeam.NewObserver(a.Gates); err == nil {
+			handler = observer.Handler(handler)
+		} else {
+			a.Logger.Warn("gate chain observer disabled: " + err.Error())
+		}
+	}
+
 	handler = middleware.LocalOnly(handler)
 	handler = middleware.RequestID(domain.NewRequestID)(handler)
 	handler = middleware.Recoverer(a.Logger)(handler)
 	return handler
+}
+
+// GateRecords returns the metadata records the logger gate has emitted. It is
+// the observation surface tests assert on; production reads them through the
+// structured logger sink.
+func (a *App) GateRecords() []map[string]string {
+	return a.gateRecords
 }
 
 // Run starts the listener and blocks until ctx is cancelled, then drains.
@@ -392,7 +496,7 @@ func (a *App) Run(ctx context.Context) error {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := a.server.Shutdown(shutdownCtx); err != nil {
+	if err := appSeam.ShutdownServer(a.server, shutdownCtx); err != nil {
 		return err
 	}
 	a.Logger.InfoContext(shutdownCtx, a.Bundle.Format(i18n.DefaultLanguage,
@@ -400,12 +504,21 @@ func (a *App) Run(ctx context.Context) error {
 	return nil
 }
 
-// Close releases the resources Build acquired.
+// Close releases the resources Build acquired. Every resource is attempted, and
+// the errors are joined so one failure does not strand the others.
 func (a *App) Close() error {
-	if a.Store != nil {
-		return a.Store.Close()
+	var errs []error
+	if a.Gates != nil {
+		if err := a.Gates.Close(); err != nil {
+			errs = append(errs, err)
+		}
 	}
-	return nil
+	if a.Store != nil {
+		if err := appSeam.CloseStore(a.Store); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // RotateManagementToken generates a new token, persists only its hash and writes

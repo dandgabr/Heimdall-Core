@@ -1,6 +1,7 @@
 package i18n
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -163,6 +164,33 @@ func TestRedactSecrets(t *testing.T) {
 			input:     "state=abcdefghijklmnopqrstuvwxyz0123456789ABCD",
 			forbidden: "abcdefghijklmnopqrstuvwxyz0123456789ABCD",
 		},
+		// P2: SHORT high-entropy codes/states must be masked too. The old guard
+		// required >= 20 chars.
+		{
+			name:      "short code mixed digit letter",
+			input:     "code=aB3xK9_z",
+			forbidden: "aB3xK9_z",
+		},
+		{
+			name:      "short state symbol",
+			input:     "state=Xy7-9q2",
+			forbidden: "Xy7-9q2",
+		},
+		{
+			name:      "short code mixed case",
+			input:     "code=QwErTy12",
+			forbidden: "QwErTy12",
+		},
+		{
+			name:      "short code query param",
+			input:     "https://127.0.0.1/cb?code=Ab3Kd9x&state=Qq2Ww8",
+			forbidden: "Ab3Kd9x",
+		},
+		{
+			name:      "short code json",
+			input:     `{"code":"Zx9_Kq2"}`,
+			forbidden: "Zx9_Kq2",
+		},
 	}
 
 	for _, tt := range tests {
@@ -182,9 +210,6 @@ func TestRedactSecrets(t *testing.T) {
 // a field name followed by an ordinary word must survive, or the redactor would
 // corrupt legitimate log lines and error messages.
 func TestRedactDoesNotMaskProse(t *testing.T) {
-	bundle := MustNew()
-	_ = bundle
-
 	tests := []string{
 		"token expirado",
 		"session iniciada",
@@ -193,11 +218,16 @@ func TestRedactDoesNotMaskProse(t *testing.T) {
 		"secret required",
 		"password required",
 		"key not found",
-		// P1-D: the ambiguous short OAuth fields must not eat ordinary prose.
+		// P1-D/P2: the ambiguous short OAuth fields must not eat ordinary prose.
 		"code=200 status",
 		"http code: 404",
 		"state=ready",
 		"state: failed",
+		"code=ok",
+		"state=null",
+		"code=not_found",
+		"state=expired",
+		"code=authorization_pending",
 		"code review requested",
 		"state machine started",
 		// code_challenge is the PUBLIC PKCE value: deliberately NOT masked.
@@ -242,5 +272,20 @@ func TestRedactPreservesContext(t *testing.T) {
 	got := RedactString("Authorization: Bearer abcdef123456")
 	if !strings.Contains(got, "Authorization:") {
 		t.Errorf("header name must be preserved: %q", got)
+	}
+}
+
+// TestApplyRuleGuardedNoCaptureGroup covers the len(sub)<2 guard: a guarded rule
+// whose regex matches but has no capture group must return the match unchanged
+// instead of indexing out of range.
+func TestApplyRuleGuardedNoCaptureGroup(t *testing.T) {
+	rule := redactionRule{
+		name:  "nogroup",
+		re:    regexp.MustCompile(`zzz`),
+		repl:  Redacted,
+		guard: func(string) bool { return true },
+	}
+	if got := applyRule("zzz", rule); got != "zzz" {
+		t.Errorf("no-capture-group guarded rule = %q, want the match unchanged", got)
 	}
 }

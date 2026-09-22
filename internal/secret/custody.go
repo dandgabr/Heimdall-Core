@@ -116,11 +116,11 @@ func (c Custody) ResolveKEK() ([]byte, KEKSource, error) {
 		}
 	}
 
-	// Layer 4 — explicit env override.
+	// Layer 4 — explicit env override. Reading an environment value cannot fail,
+	// so this layer has no error path (unlike the file/keyring layers): it either
+	// yields material or is not configured.
 	if c.AllowEnvOverride {
-		if material, ok, err := c.envOverride(); err != nil {
-			return nil, "", err
-		} else if ok {
+		if material, ok := c.envOverride(); ok {
 			return c.derive(material, SourceEnvOverride)
 		}
 	}
@@ -157,9 +157,9 @@ func (c Custody) systemdCredential() (material []byte, ok bool, err error) {
 		name = "heimdall-master-key"
 	}
 	path := filepath.Join(dir, name)
-	raw, readErr := os.ReadFile(path)
+	raw, readErr := custodyFileOps.ReadFile(path)
 	if readErr != nil {
-		if os.IsNotExist(readErr) {
+		if custodyFileOps.IsNotExist(readErr) {
 			// The dir exists but our credential is not there: not configured.
 			return nil, false, nil
 		}
@@ -180,10 +180,22 @@ func (c Custody) systemdCredential() (material []byte, ok bool, err error) {
 }
 
 // keyring reads the KEK material from the desktop keyring via secret-tool. The
+// keyringLookPath and keyringLookup are seams over the secret-tool binary so a
+// test can exercise every branch (helper missing, entry absent, entry present,
+// helper error) without depending on the host's keyring. Production uses the
+// real implementations.
+var (
+	keyringLookPath = exec.LookPath
+	keyringLookup   = func(service, account string) ([]byte, error) {
+		return exec.Command("secret-tool", "lookup",
+			"service", service, "account", account).Output()
+	}
+)
+
 // binary is invoked, not linked: there is no libsecret dependency, so the
 // CGO_ENABLED=0 build is untouched.
 func (c Custody) keyring() (material []byte, ok bool, err error) {
-	if _, lookErr := exec.LookPath("secret-tool"); lookErr != nil {
+	if _, lookErr := keyringLookPath("secret-tool"); lookErr != nil {
 		// No helper installed: not configured, move on.
 		return nil, false, nil
 	}
@@ -195,7 +207,7 @@ func (c Custody) keyring() (material []byte, ok bool, err error) {
 	if account == "" {
 		account = "master-key"
 	}
-	out, cmdErr := exec.Command("secret-tool", "lookup", "service", service, "account", account).Output()
+	out, cmdErr := keyringLookup(service, account)
 	if cmdErr != nil {
 		var exitErr *exec.ExitError
 		if errors.As(cmdErr, &exitErr) {
@@ -217,14 +229,31 @@ func (c Custody) keyring() (material []byte, ok bool, err error) {
 	return material, true, nil
 }
 
+// custodyFS is the filesystem seam for the key-file and systemd-credential
+// layers. Production uses the os implementations; a test injects failures to
+// reach the stat/read error branches a healthy host will not produce.
+type custodyFS struct {
+	Stat       func(string) (os.FileInfo, error)
+	ReadFile   func(string) ([]byte, error)
+	IsNotExist func(error) bool
+}
+
+var defaultCustodyFS = custodyFS{
+	Stat:       os.Stat,
+	ReadFile:   os.ReadFile,
+	IsNotExist: os.IsNotExist,
+}
+
+var custodyFileOps = defaultCustodyFS
+
 // keyFile reads the passphrase from a 0600 file. The file holds the material
 // that Argon2id turns into the KEK, so the file alone does not decrypt the
 // vault. A file that exists but is group/world-readable is REFUSED (fail-closed)
 // rather than repaired, matching the vault policy in internal/store.
 func (c Custody) keyFile() (material []byte, ok bool, err error) {
-	info, statErr := os.Stat(c.KeyFilePath)
+	info, statErr := custodyFileOps.Stat(c.KeyFilePath)
 	if statErr != nil {
-		if os.IsNotExist(statErr) {
+		if custodyFileOps.IsNotExist(statErr) {
 			return nil, false, nil
 		}
 		return nil, false, domain.New(domain.CodeSecretKeyfileFailed,
@@ -241,7 +270,7 @@ func (c Custody) keyFile() (material []byte, ok bool, err error) {
 			}),
 		)
 	}
-	raw, readErr := os.ReadFile(c.KeyFilePath)
+	raw, readErr := custodyFileOps.ReadFile(c.KeyFilePath)
 	if readErr != nil {
 		return nil, false, domain.New(domain.CodeSecretKeyfileFailed,
 			domain.WithHTTPStatus(500),
@@ -270,18 +299,18 @@ func (c Custody) keyFile() (material []byte, ok bool, err error) {
 // envOverride is the explicit, deprecated layer. It is only consulted when the
 // operator set AllowEnvOverride; the value then passes through Argon2id like any
 // other material, so even this layer does not use the raw env value as a key.
-func (c Custody) envOverride() (material []byte, ok bool, err error) {
+func (c Custody) envOverride() (material []byte, ok bool) {
 	name := c.MasterKeyEnv
 	if name == "" {
 		name = "HEIMDALL_MASTER_KEY"
 	}
 	value := c.env(name)
 	if value == "" {
-		return nil, false, nil
+		return nil, false
 	}
 	c.logger().Warn("deprecated master key source in use; prefer TPM2, keyring or a 0600 key file",
 		slog.String("var", name))
-	return []byte(value), true, nil
+	return []byte(value), true
 }
 
 func (c Custody) env(name string) string {

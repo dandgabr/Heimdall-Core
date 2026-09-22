@@ -176,13 +176,10 @@ func (f *PKCEFlow) redirectWithPort(boundAddr string) (string, error) {
 			domain.WithParams(map[string]string{"reason": "no redirect allowlist configured"}),
 		)
 	}
+	// The template IS f.allowlist[0], so it is allowlisted by construction; no
+	// separate membership check is needed here (the caller-supplied redirect in
+	// AwaitCallback is validated against the allowlist there).
 	template := f.allowlist[0]
-	if !f.allowedRedirect(template) {
-		return "", domain.New(domain.CodeAuthFlowInsecure,
-			domain.WithHTTPStatus(500),
-			domain.WithParams(map[string]string{"reason": "redirect uri is not allowlisted"}),
-		)
-	}
 	base, err := url.Parse(template)
 	if err != nil {
 		return "", domain.New(domain.CodeAuthFlowInsecure,

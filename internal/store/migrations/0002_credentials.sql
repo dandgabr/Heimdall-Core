@@ -19,11 +19,9 @@ CREATE TABLE IF NOT EXISTS credentials (
 -- Lookup by family for per-provider listing and wildcard routing.
 CREATE INDEX IF NOT EXISTS idx_credentials_provider ON credentials (provider);
 
--- Cooldown/quota state per credential. Kept beside the credential so a single
--- read resolves everything the router needs; expires_at mirrors the access
--- token expiry the Executor cares about.
-CREATE TABLE IF NOT EXISTS credential_state (
-    credential_id TEXT PRIMARY KEY REFERENCES credentials (id) ON DELETE CASCADE,
-    state         TEXT NOT NULL DEFAULT '{}',
-    updated_at    TEXT NOT NULL
-);
+-- NOTE: an earlier draft created a `credential_state` table here for
+-- cooldown/quota state. It was never read or written by any Go code, so it was
+-- removed rather than left as dead schema. Cooldown/quota persistence is F3
+-- (`Dispatcher`/`Breaker`/`QuotaFilter`); when it lands it will add its own
+-- migration with the shape the breaker actually needs, instead of a speculative
+-- table that would have to be migrated away from.

@@ -1,8 +1,8 @@
 package secret
 
 import (
-	"crypto/rand"
 	"encoding/base64"
+	"io"
 
 	"golang.org/x/crypto/argon2"
 
@@ -49,8 +49,14 @@ type KDFParams struct {
 	KeyLen uint32
 }
 
-// Validate rejects a zeroed or degenerate parameter set. A KeyLen other than
-// 32 is refused because both the KEK and the DEK are AES-256.
+// Validate rejects a zeroed or degenerate parameter set.
+//
+// KeyLen is checked here, and it MUST be: argon2.IDKey with keyLen == 0 returns
+// nil from its blake2b hash and the library then dereferences it, panicking with
+// a nil-pointer fault BEFORE any output guard could run. Time < 1 and Threads < 1
+// panic inside argon2 for the same reason, so all three preconditions are refused
+// at the boundary. A KeyLen other than 32 is also refused because both the KEK
+// and the DEK are AES-256.
 func (p KDFParams) Validate() error {
 	if p.Memory == 0 || p.Time == 0 || p.Threads == 0 {
 		return domain.New(domain.CodeSecretKDFFailed,
@@ -70,7 +76,7 @@ func (p KDFParams) Validate() error {
 // NewSalt returns a fresh per-installation salt.
 func NewSalt() ([]byte, error) {
 	salt := make([]byte, SaltSize)
-	if _, err := rand.Read(salt); err != nil {
+	if _, err := io.ReadFull(randReader, salt); err != nil {
 		return nil, wrapRand(err)
 	}
 	return salt, nil
@@ -95,7 +101,11 @@ func DeriveKEK(material, salt []byte, params KDFParams) ([]byte, error) {
 	if err := params.Validate(); err != nil {
 		return nil, err
 	}
-	kek := argon2.IDKey(material, salt, params.Time, params.Memory, params.Threads, params.KeyLen)
+	kek := deriveKeyFn(material, salt, params.Time, params.Memory, params.Threads, params.KeyLen)
+	// Defence in depth: Validate already pinned KeyLen == 32, so a correct KDF
+	// yields exactly 32 bytes. This guard catches a KDF that returns a different
+	// length (e.g. a future swap or a bad KeyLen that slipped past Validate),
+	// turning a silently-wrong key into a hard failure.
 	if len(kek) != KEKSize {
 		return nil, domain.New(domain.CodeSecretKDFFailed,
 			domain.WithHTTPStatus(500),
@@ -104,6 +114,12 @@ func DeriveKEK(material, salt []byte, params KDFParams) ([]byte, error) {
 	}
 	return kek, nil
 }
+
+// deriveKeyFn is a seam over argon2.IDKey so the post-derive length guard can be
+// exercised with a fake KDF that returns a wrong-length key. The real KDF, with
+// KeyLen validated == 32, always returns 32 bytes, so the guard is otherwise
+// unreachable.
+var deriveKeyFn = argon2.IDKey
 
 // MetaStore is the minimal persistence the salt needs. SetMetaIfAbsent is the
 // atomic insert-if-absent primitive that makes load-or-create race-free; it is

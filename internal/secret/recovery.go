@@ -1,8 +1,7 @@
 package secret
 
 import (
-	"crypto/rand"
-	"encoding/base64"
+	"io"
 
 	"github.com/dandgabr/heimdall-core/internal/domain"
 )
@@ -56,10 +55,10 @@ func WrapKEKForRecovery(kek []byte, passphrase []byte, params KDFParams) (string
 		return "", err
 	}
 	iv := make([]byte, IVSize)
-	if _, err := rand.Read(iv); err != nil {
+	if _, err := io.ReadFull(randReader, iv); err != nil {
 		return "", wrapRand(err)
 	}
-	aead, err := newGCM(wrapKey)
+	aead, err := newGCMFn(wrapKey)
 	if err != nil {
 		return "", err
 	}
@@ -103,7 +102,7 @@ func UnwrapKEKFromRecovery(blob string, passphrase []byte, params KDFParams) ([]
 	if err != nil {
 		return nil, err
 	}
-	aead, err := newGCM(wrapKey)
+	aead, err := newGCMFn(wrapKey)
 	if err != nil {
 		return nil, err
 	}
@@ -117,8 +116,10 @@ func UnwrapKEKFromRecovery(blob string, passphrase []byte, params KDFParams) ([]
 	return kek, nil
 }
 
-// splitRecovery validates and splits the fixed shape, returning nil on any
-// deviation.
+// splitRecovery splits the fixed shape and validates the prefix, returning nil
+// on any deviation. It deliberately does NOT validate the body parts' base64:
+// each part is decoded at its own site in UnwrapKEKFromRecovery, so the decoder
+// errors stay independently reachable and reported with a specific reason.
 func splitRecovery(blob string) []string {
 	// enc : recovery : salt : iv : ct : tag
 	const expected = 6
@@ -135,12 +136,6 @@ func splitRecovery(blob string) []string {
 	}
 	if parts[0] != "enc" || parts[1] != "recovery" {
 		return nil
-	}
-	// Guard the base64 alphabet so a stray ':' cannot be smuggled through.
-	for _, p := range parts[2:] {
-		if _, err := base64.RawStdEncoding.DecodeString(p); err != nil {
-			return nil
-		}
 	}
 	return parts[2:]
 }

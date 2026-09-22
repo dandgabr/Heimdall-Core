@@ -28,6 +28,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -80,7 +81,7 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 
-	writeDB, err := sql.Open(DriverName, dsn(path, 1))
+	writeDB, err := sqlOpen(DriverName, dsn(path, 1))
 	if err != nil {
 		return nil, openError(path, err)
 	}
@@ -88,7 +89,7 @@ func Open(path string) (*Store, error) {
 	writeDB.SetMaxOpenConns(1)
 	writeDB.SetMaxIdleConns(1)
 
-	readDB, err := sql.Open(DriverName, dsn(path, 0))
+	readDB, err := sqlOpen(DriverName, dsn(path, 0))
 	if err != nil {
 		_ = writeDB.Close()
 		return nil, openError(path, err)
@@ -175,10 +176,42 @@ func dsn(path string, _ int) string {
 // every boot. An existing file with a mode more permissive than 0600 is refused
 // (ADR-003: fail-closed) rather than silently chmod-ed, because its exposure
 // already happened and the operator must be told.
+// vaultFS is the filesystem seam for ensurePermissions. Production uses the os
+// implementations; a test injects failures to reach the OS-error branches
+// (mkdir/stat/open/chmod failures) that cannot be provoked on a healthy host.
+type vaultFS struct {
+	MkdirAll func(string, os.FileMode) error
+	Stat     func(string) (os.FileInfo, error)
+	OpenFile func(string, int, os.FileMode) (*os.File, error)
+	Chmod    func(string, os.FileMode) error
+	// ChmodFile applies the mode to the just-created file descriptor. It is a
+	// separate seam because *os.File.Chmod cannot fail on a healthy Linux host.
+	ChmodFile func(*os.File, os.FileMode) error
+	IsExist   func(error) bool
+}
+
+var defaultVaultFS = vaultFS{
+	MkdirAll:  os.MkdirAll,
+	Stat:      os.Stat,
+	OpenFile:  os.OpenFile,
+	Chmod:     os.Chmod,
+	ChmodFile: func(f *os.File, mode os.FileMode) error { return f.Chmod(mode) },
+	IsExist:   os.IsExist,
+}
+
+// sqlOpen is the database/sql.Open seam, so a test can make the driver's
+// *sql.Open* step fail and reach Open's openError branches (which a healthy
+// process cannot otherwise provoke: sql.Open only validates the DSN lazily).
+var sqlOpen = sql.Open
+
+// vaultFileOps is swapped in tests to inject OS failures.
+var vaultFileOps = defaultVaultFS
+
 func ensurePermissions(path string) error {
+	fs := vaultFileOps
 	dir := filepath.Dir(path)
 	if dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, VaultDirMode); err != nil {
+		if err := fs.MkdirAll(dir, VaultDirMode); err != nil {
 			return domain.New(domain.CodeStoreOpenFailed,
 				domain.WithHTTPStatus(500),
 				domain.WithCause(err),
@@ -188,7 +221,7 @@ func ensurePermissions(path string) error {
 		// MkdirAll honours the umask, so an existing directory may be more
 		// permissive than requested. Tighten our own directory on every boot;
 		// refuse only if it is group/world writable after the attempt.
-		info, err := os.Stat(dir)
+		info, err := fs.Stat(dir)
 		if err != nil {
 			return domain.New(domain.CodeStoreOpenFailed,
 				domain.WithHTTPStatus(500),
@@ -197,18 +230,18 @@ func ensurePermissions(path string) error {
 			)
 		}
 		if info.Mode().Perm() != VaultDirMode {
-			_ = os.Chmod(dir, VaultDirMode)
+			_ = fs.Chmod(dir, VaultDirMode)
 		}
 	}
 
 	// Create the file 0600 at origin if it does not exist. O_EXCL keeps us from
 	// racing an existing file; an EEXIST means another boot already created it,
 	// which is fine and falls through to the validation below.
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, VaultFileMode)
+	f, err := fs.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, VaultFileMode)
 	if err == nil {
 		// O_CREATE mode is masked by the umask; force the exact mode so a
 		// umask of 0 cannot leave the vault group-readable.
-		if chmodErr := f.Chmod(VaultFileMode); chmodErr != nil {
+		if chmodErr := fs.ChmodFile(f, VaultFileMode); chmodErr != nil {
 			_ = f.Close()
 			return domain.New(domain.CodeStoreOpenFailed,
 				domain.WithHTTPStatus(500),
@@ -218,7 +251,7 @@ func ensurePermissions(path string) error {
 		}
 		return f.Close()
 	}
-	if !os.IsExist(err) {
+	if !fs.IsExist(err) {
 		return domain.New(domain.CodeStoreOpenFailed,
 			domain.WithHTTPStatus(500),
 			domain.WithCause(err),
@@ -226,7 +259,7 @@ func ensurePermissions(path string) error {
 		)
 	}
 
-	info, err := os.Stat(path)
+	info, err := fs.Stat(path)
 	if err != nil {
 		return domain.New(domain.CodeStoreOpenFailed,
 			domain.WithHTTPStatus(500),
@@ -317,10 +350,15 @@ func HashManagementToken(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// randReader is the entropy source for the management token. It is a package
+// variable so a test can inject a failing reader and cover the crypto/rand error
+// branch. Production never changes it.
+var randReader io.Reader = rand.Reader
+
 // newManagementToken returns a fresh 256-bit token, hex encoded.
 func newManagementToken() (string, error) {
 	buf := make([]byte, ManagementTokenBytes)
-	if _, err := rand.Read(buf); err != nil {
+	if _, err := io.ReadFull(randReader, buf); err != nil {
 		return "", domain.New(domain.CodeStoreTokenFailed,
 			domain.WithHTTPStatus(500), domain.WithCause(err))
 	}
@@ -393,25 +431,49 @@ func (s *Store) VerifyManagementToken(presented string) bool {
 	return subtle.ConstantTimeCompare([]byte(stored), []byte(presentedHash)) == 1
 }
 
+// tokenFileOps are the filesystem seams WriteTokenFile uses. They are package
+// variables so a test can inject failures at each step (temp creation, chmod,
+// write, close, rename) without provoking real disk errors. Production uses the
+// os implementations.
+type tokenTempFile interface {
+	Name() string
+	Chmod(os.FileMode) error
+	WriteString(string) (int, error)
+	Close() error
+}
+
+var (
+	osMkdirAll   = os.MkdirAll
+	osCreateTemp = func(dir, pattern string) (tokenTempFile, error) {
+		f, err := os.CreateTemp(dir, pattern)
+		if err != nil {
+			return nil, err
+		}
+		return f, nil
+	}
+	osRemoveToken = os.Remove
+	osRenameToken = os.Rename
+)
+
 // WriteTokenFile writes the plaintext token to path with mode 0600, creating it
 // atomically: a temp file in the same directory is written and renamed into
 // place, so a reader never observes a partial or permissively-created file.
 func WriteTokenFile(path, token string) error {
 	dir := filepath.Dir(path)
 	if dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, VaultDirMode); err != nil {
+		if err := osMkdirAll(dir, VaultDirMode); err != nil {
 			return domain.New(domain.CodeStoreTokenFailed,
 				domain.WithHTTPStatus(500), domain.WithCause(err),
 				domain.WithParams(map[string]string{"reason": "cannot create " + dir}))
 		}
 	}
-	tmp, err := os.CreateTemp(dir, ".token-*")
+	tmp, err := osCreateTemp(dir, ".token-*")
 	if err != nil {
 		return domain.New(domain.CodeStoreTokenFailed,
 			domain.WithHTTPStatus(500), domain.WithCause(err))
 	}
 	tmpName := tmp.Name()
-	cleanup := func() { _ = os.Remove(tmpName) }
+	cleanup := func() { _ = osRemoveToken(tmpName) }
 
 	if err := tmp.Chmod(TokenFileMode); err != nil {
 		_ = tmp.Close()
@@ -430,7 +492,7 @@ func WriteTokenFile(path, token string) error {
 		return domain.New(domain.CodeStoreTokenFailed,
 			domain.WithHTTPStatus(500), domain.WithCause(err))
 	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := osRenameToken(tmpName, path); err != nil {
 		cleanup()
 		return domain.New(domain.CodeStoreTokenFailed,
 			domain.WithHTTPStatus(500), domain.WithCause(err))

@@ -17,10 +17,17 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/dandgabr/heimdall-core/internal/domain"
 )
+
+// randReader is the entropy source for every random value in this package (IVs,
+// DEKs, salts, PKCE verifiers). It is a package variable so a test can inject a
+// failing reader and exercise the crypto/rand error branches, which are
+// otherwise unreachable. Production never changes it.
+var randReader io.Reader = rand.Reader
 
 // Format constants.
 const (
@@ -76,15 +83,15 @@ func Seal(kek, plaintext []byte) (string, error) {
 
 	// Per-record DEK.
 	dek := make([]byte, DEKSize)
-	if _, err := rand.Read(dek); err != nil {
+	if _, err := io.ReadFull(randReader, dek); err != nil {
 		return "", wrapRand(err)
 	}
 
 	recordIV := make([]byte, IVSize)
-	if _, err := rand.Read(recordIV); err != nil {
+	if _, err := io.ReadFull(randReader, recordIV); err != nil {
 		return "", wrapRand(err)
 	}
-	recordAEAD, err := newGCM(dek)
+	recordAEAD, err := newGCMFn(dek)
 	if err != nil {
 		return "", err
 	}
@@ -95,10 +102,10 @@ func Seal(kek, plaintext []byte) (string, error) {
 
 	// Wrap the DEK under the KEK.
 	wrapIV := make([]byte, IVSize)
-	if _, err := rand.Read(wrapIV); err != nil {
+	if _, err := io.ReadFull(randReader, wrapIV); err != nil {
 		return "", wrapRand(err)
 	}
-	wrapAEAD, err := newGCM(kek)
+	wrapAEAD, err := newGCMFn(kek)
 	if err != nil {
 		return "", err
 	}
@@ -131,7 +138,7 @@ func Open(kek []byte, encoded string) ([]byte, error) {
 		)
 	}
 
-	wrapAEAD, err := newGCM(kek)
+	wrapAEAD, err := newGCMFn(kek)
 	if err != nil {
 		return nil, err
 	}
@@ -144,6 +151,11 @@ func Open(kek []byte, encoded string) ([]byte, error) {
 			domain.WithCause(err),
 		)
 	}
+	// Defensive invariant: ParseEnvelope pins WrappedDEK to exactly DEKSize
+	// bytes and GCM ciphertext length always equals plaintext length, so this
+	// guard cannot fire on any input a caller can construct. It is kept as a
+	// belt-and-braces check so a future format change cannot silently accept a
+	// short DEK; hence it stays uncovered by design.
 	if len(dek) != DEKSize {
 		return nil, domain.New(domain.CodeSecretDecryptFailed,
 			domain.WithHTTPStatus(500),
@@ -151,7 +163,7 @@ func Open(kek []byte, encoded string) ([]byte, error) {
 		)
 	}
 
-	recordAEAD, err := newGCM(dek)
+	recordAEAD, err := newGCMFn(dek)
 	if err != nil {
 		return nil, err
 	}
@@ -175,7 +187,7 @@ func Rewrap(oldKEK, newKEK []byte, encoded string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	oldAEAD, err := newGCM(oldKEK)
+	oldAEAD, err := newGCMFn(oldKEK)
 	if err != nil {
 		return "", err
 	}
@@ -187,12 +199,12 @@ func Rewrap(oldKEK, newKEK []byte, encoded string) (string, error) {
 		)
 	}
 
-	newAEAD, err := newGCM(newKEK)
+	newAEAD, err := newGCMFn(newKEK)
 	if err != nil {
 		return "", err
 	}
 	wrapIV := make([]byte, IVSize)
-	if _, err := rand.Read(wrapIV); err != nil {
+	if _, err := io.ReadFull(randReader, wrapIV); err != nil {
 		return "", wrapRand(err)
 	}
 	wrapped := newAEAD.Seal(nil, wrapIV, dek, nil)
@@ -279,8 +291,18 @@ func encodeEnvelope(env *Envelope) string {
 		b64encode(env.WrapIV) + ":" + b64encode(blob) + ":" + b64encode(env.WrapTag)
 }
 
+// newGCMFn is a seam over newGCM so the caller's error-propagation branches
+// (Seal/Open/Rewrap/recovery) are reachable in tests. cipher.NewGCM cannot fail
+// for a valid AES block, so the branch is otherwise dead.
+var newGCMFn = newGCM
+
+// newAESBlock is a seam over aes.NewCipher so a test can return a block whose
+// BlockSize is not 16, reaching the cipher.NewGCM guard that a real AES block
+// can never trigger.
+var newAESBlock = aes.NewCipher
+
 func newGCM(key []byte) (cipher.AEAD, error) {
-	block, err := aes.NewCipher(key)
+	block, err := newAESBlock(key)
 	if err != nil {
 		return nil, domain.New(domain.CodeSecretKDFFailed,
 			domain.WithHTTPStatus(500),
@@ -288,6 +310,9 @@ func newGCM(key []byte) (cipher.AEAD, error) {
 			domain.WithParams(map[string]string{"reason": "invalid AES key"}),
 		)
 	}
+	// cipher.NewGCM requires a 128-bit block. aes.NewCipher always satisfies it,
+	// so this guard only fires if the block construction is swapped for a cipher
+	// with a different block size; the newAESBlock seam makes it testable.
 	aead, err := cipher.NewGCM(block)
 	if err != nil {
 		return nil, domain.New(domain.CodeSecretKDFFailed,

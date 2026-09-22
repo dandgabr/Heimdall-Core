@@ -96,6 +96,18 @@ func TestGateRegistryBuildRejectsEmptyStages(t *testing.T) {
 	}
 }
 
+// TestGateRegistryBuildRejectsNilFactoryResult covers the branch where a usable
+// factory nevertheless returns nil at build time.
+func TestGateRegistryBuildRejectsNilFactoryResult(t *testing.T) {
+	r := NewGateRegistry()
+	if err := r.RegisterGate("nilresult", func() Gate { return nil }); err != nil {
+		t.Fatalf("RegisterGate: %v", err)
+	}
+	if _, err := r.Build(); err == nil {
+		t.Fatal("nil gate result accepted, want error")
+	}
+}
+
 // TestSecretNeverRendersPlaintext pins the redaction guarantee for every verb
 // fmt routes through Formatter/Stringer. %p is asserted separately because fmt
 // handles it before consulting the interface (see the Secret doc comment): it is

@@ -40,10 +40,12 @@ STATICCHECK_VERSION  ?= v0.8.1
 GOVULNCHECK_VERSION  ?= v1.8.0
 
 # Piso de cobertura global (percentual) exigido por `cover-check`.
-# Medido em 2026-09-21: 74,3%. O piso fica 4,3 pontos abaixo: folga para o código
-# crescer mais rápido que os testes, sem deixar a cobertura erodir em silêncio.
-# Deve subir junto com a suíte.
-COVER_MIN ?= 70
+# Medido em 2026-09-22: 100,0% em 20 pacotes (2680 instruções). O piso em 98 deixa
+# ~2 pp de folga — cerca de 54 instruções: o bastante para caminhos de erro
+# pontuais, e pouco o suficiente para que nenhum subsistema fique sem teste sem o
+# pipeline acusar. Deve acompanhar a suíte; 99 é o próximo passo natural quando as
+# suítes da fase estiverem completas.
+COVER_MIN ?= 98
 
 .PHONY: build test vet lint race cover cover-check vuln dist clean
 
@@ -66,8 +68,8 @@ vet:
 # alvo funciona numa máquina limpa (sem `go install` prévio) e continua pinado na
 # MESMA versão que o CI usa. O CI instala o binário e roda `staticcheck` direto,
 # então o gate remoto segue estrito — este alvo apenas deixa de ser um bloqueio
-# artificial no ambiente local. O download do módulo exige rede na primeira vez;
-# `GOFLAGS=-mod=mod` evita que um vendor/ ausente quebre a execução.
+# artificial no ambiente local. O download do módulo exige rede na primeira vez e
+# depois fica em cache. A receita não define GOFLAGS nem depende de vendor/.
 lint:
 	$(GO) run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION) ./...
 

@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"path"
 	"regexp"
 	"sort"
@@ -41,9 +42,21 @@ type Bundle struct {
 	matcher  language.Matcher
 }
 
+// defaultCatalogFS is the catalog source New reads. It is a package variable so
+// a test can inject a broken source and exercise New's (and MustNew's) failure
+// path; production always uses the embedded FS.
+var defaultCatalogFS fs.FS = catalogsFS
+
 // New loads every catalog under catalogs/ and builds the language matcher.
 func New() (*Bundle, error) {
-	entries, err := catalogsFS.ReadDir("catalogs")
+	return loadFrom(defaultCatalogFS)
+}
+
+// loadFrom is New with an injectable catalog source. Production passes the
+// embedded FS; a test passes an fs.FS so the read/parse/missing-default branches
+// are reachable without shipping a broken catalog.
+func loadFrom(fsys fs.FS) (*Bundle, error) {
+	entries, err := fs.ReadDir(fsys, "catalogs")
 	if err != nil {
 		return nil, fmt.Errorf("i18n: read embedded catalogs: %w", err)
 	}
@@ -53,7 +66,7 @@ func New() (*Bundle, error) {
 		if e.IsDir() || path.Ext(e.Name()) != ".json" {
 			continue
 		}
-		raw, err := catalogsFS.ReadFile(path.Join("catalogs", e.Name()))
+		raw, err := fs.ReadFile(fsys, path.Join("catalogs", e.Name()))
 		if err != nil {
 			return nil, fmt.Errorf("i18n: read %s: %w", e.Name(), err)
 		}

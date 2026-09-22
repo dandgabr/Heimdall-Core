@@ -96,6 +96,52 @@ func TestOpenAICompatCapabilities(t *testing.T) {
 	}
 }
 
+// TestOpenAICompatDescriptorAndIDs covers the Descriptor accessor and the
+// registry IDs accessor (both 0% before).
+func TestOpenAICompatDescriptorAndIDs(t *testing.T) {
+	f, err := NewOpenAICompat(OpenAICompatOptions{
+		ID: "z.ai",
+		Descriptor: contracts.ProviderDescriptor{
+			DisplayName: "Z.ai",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewOpenAICompat: %v", err)
+	}
+	desc := f.Descriptor()
+	if desc.ID != "z.ai" || desc.Protocol != contracts.WireOpenAI || desc.DisplayName != "Z.ai" {
+		t.Errorf("Descriptor = %+v", desc)
+	}
+
+	r := NewRegistry()
+	if err := r.Register(f); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if err := r.Register(stubFamily("antigravity")); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	ids := r.IDs()
+	if len(ids) != 2 || ids[0] != "antigravity" || ids[1] != "z.ai" {
+		t.Errorf("IDs() = %v, want [antigravity z.ai]", ids)
+	}
+}
+
+// TestOpenAICompatModalitiesUnknown covers the Modalities miss branch.
+func TestOpenAICompatModalitiesUnknown(t *testing.T) {
+	f, _ := NewOpenAICompat(OpenAICompatOptions{
+		ID: "z.ai",
+		Models: map[domain.ModelID]ModelCapabilities{
+			"known": {Modalities: contracts.ModalitySet(0).Add(contracts.ModalityText)},
+		},
+	})
+	if _, ok := f.Modalities("unknown"); ok {
+		t.Error("unknown model reported Modalities ok=true")
+	}
+	if mods, ok := f.Modalities("known"); !ok || !mods.Has(contracts.ModalityText) {
+		t.Errorf("known model = %v, %v", mods, ok)
+	}
+}
+
 func TestOpenAICompatDefaults(t *testing.T) {
 	f, err := NewOpenAICompat(OpenAICompatOptions{ID: "cmd"})
 	if err != nil {

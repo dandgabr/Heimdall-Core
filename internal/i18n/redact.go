@@ -44,18 +44,77 @@ const secretFieldNames = `api[_-]?key|key|access[_-]?token|refresh[_-]?token|id[
 // "state=ready" survive while a real authorization code or CSRF state does not.
 const oauthShortFieldNames = `code|state`
 
-// minOAuthCodeLen is the shortest value treated as an OAuth code/state. Real
-// values are high-entropy base64url or hex of 20+ chars (a 128-bit state is ~22
-// base64url chars); requiring this length is what keeps the guarded rule from
-// eating ordinary prose.
-const minOAuthCodeLen = 20
+// minOAuthCodeLen is the shortest value the OAuth rule will even consider. It is
+// 6, not 20: a provider is free to issue a short code, and a real one must not
+// leak just because it is short. The guard below is what separates a short
+// SECRET from a short ordinary word — length alone was the wrong discriminator.
+const minOAuthCodeLen = 6
 
-// oauthCodeGuard accepts a value as an OAuth code/state only when it is long
-// enough AND looks like a credential rather than a word. It reuses the same
-// entropy heuristic as the space-separated rule.
+// oauthCodeGuard decides whether a value following `code`/`state` is a secret
+// rather than ordinary prose.
+//
+// The earlier version required >= 20 chars, which let a genuinely short code or
+// state leak. The criterion here is ENTROPY-SHAPED, not length-shaped. After the
+// minimum length, the decision is:
+//
+//  1. all-digit values ("200", "404") are HTTP statuses/counts, never secrets;
+//  2. a value with a base64url/base64 symbol (- _ . / + =) is a credential;
+//  3. a value mixing a digit with a letter ("aB3xK9z", "abc123") is a credential;
+//  4. a value mixing upper and lower case ("QwErTy") is a credential;
+//  5. anything else is a pure letter run. A SHORT one is a word ("ready",
+//     "expired", "null") and survives; a LONG one (>= longRunLen) is far more
+//     likely a lowercase hex/base64 token, so it is masked.
 func oauthCodeGuard(value string) bool {
-	return len(value) >= minOAuthCodeLen && looksLikeCredential(value)
+	if len(value) < minOAuthCodeLen {
+		return false
+	}
+
+	var hasDigit, hasUpper, hasLower, hasSep, hasSymbol bool
+	for _, r := range value {
+		switch {
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		case r >= 'A' && r <= 'Z':
+			hasUpper = true
+		case r >= 'a' && r <= 'z':
+			hasLower = true
+		case r == '_' || r == '-':
+			// A separator: a snake_case/kebab identifier uses these, and so does
+			// base64url. On its own it is ambiguous, so it is tracked separately
+			// from a decisive symbol.
+			hasSep = true
+		case r > unicode.MaxASCII:
+			// A non-ASCII letter is a word character, never a code symbol.
+			hasLower = true
+		default:
+			hasSymbol = true
+		}
+	}
+
+	switch {
+	case hasDigit && !hasUpper && !hasLower && !hasSymbol && !hasSep:
+		return false // all digits: status/count ("200", "404")
+	case hasSymbol:
+		return true // '.', '/', '+', '=' : decisively a token
+	case hasDigit && (hasUpper || hasLower):
+		return true // digit + letter: "aB3xK9z", "abc123"
+	case hasUpper && hasLower:
+		return true // mixed case: "QwErTy"
+	case hasSep:
+		// A lowercase identifier with separators ("not_found",
+		// "authorization_pending") is word-shaped and survives.
+		return false
+	default:
+		// Pure single-case letter run. Mask only when long enough to be a
+		// lowercase hex/base64 token rather than a word.
+		return len(value) >= longRunLen
+	}
 }
+
+// longRunLen is the length at or above which a single-case letter run is treated
+// as a token rather than a word. It matches the heuristic the generic
+// space-separated rule already uses.
+const longRunLen = 16
 
 // tokenChars is the set of characters that can appear inside a credential
 // (JWT/hex/base64url): dots, dashes, underscores, slashes, plus signs and

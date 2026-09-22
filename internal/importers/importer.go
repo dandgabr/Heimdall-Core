@@ -85,7 +85,7 @@ func (im *Importer) ImportAll(ctx context.Context) ([]Result, error) {
 
 	// Antigravity: no readable token file is known, so nothing is imported.
 	// See importAntigravity for the rationale.
-	ag, err := im.importAntigravity(ctx)
+	ag, err := antigravityImport(im, ctx)
 	if err != nil {
 		return results, err
 	}
@@ -221,6 +221,13 @@ func (im *Importer) importCommandCode(ctx context.Context) ([]Result, error) {
 // this is a no-op by design.
 func (im *Importer) importAntigravity(context.Context) ([]Result, error) {
 	return nil, nil
+}
+
+// antigravityImport is the seam ImportAll calls for the Antigravity source. It
+// defaults to importAntigravity (the documented no-op); a test swaps it to cover
+// ImportAll's propagation of an Antigravity error.
+var antigravityImport = func(im *Importer, ctx context.Context) ([]Result, error) {
+	return im.importAntigravity(ctx)
 }
 
 // --- shared ---

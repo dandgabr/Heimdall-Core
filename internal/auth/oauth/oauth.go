@@ -240,10 +240,15 @@ func flowError(err error) error {
 
 // --- PKCE + state helpers ---
 
+// randReader is the entropy source for the state and PKCE verifier. It is a
+// package variable so a test can inject a failing reader and cover the
+// crypto/rand error branch. Production never changes it.
+var randReader io.Reader = rand.Reader
+
 // NewState returns a single-use anti-CSRF state of at least 128 bits.
 func NewState() (string, error) {
 	buf := make([]byte, 32) // 256 bits, comfortably above the 128-bit floor
-	if _, err := rand.Read(buf); err != nil {
+	if _, err := io.ReadFull(randReader, buf); err != nil {
 		return "", flowError(err)
 	}
 	return base64.RawURLEncoding.EncodeToString(buf), nil
@@ -253,7 +258,7 @@ func NewState() (string, error) {
 // The verifier is 43 chars of base64url, the minimum the spec allows.
 func NewPKCEVerifier() (verifier, challenge string, err error) {
 	buf := make([]byte, 32)
-	if _, err := rand.Read(buf); err != nil {
+	if _, err := io.ReadFull(randReader, buf); err != nil {
 		return "", "", flowError(err)
 	}
 	verifier = base64.RawURLEncoding.EncodeToString(buf)

@@ -38,8 +38,14 @@ func New(gates []contracts.Gate) (*Chain, error) {
 	return &Chain{gates: append([]contracts.Gate(nil), gates...)}, nil
 }
 
-// Gates returns the gates in order.
-func (c *Chain) Gates() []contracts.Gate { return c.gates }
+// Gates returns the gates in order. It returns a COPY: a caller that mutated the
+// slice would otherwise be able to null out a gate and silently disable a
+// security control.
+func (c *Chain) Gates() []contracts.Gate {
+	out := make([]contracts.Gate, len(c.gates))
+	copy(out, c.gates)
+	return out
+}
 
 // PreRequest runs every gate that declares StagePreRequest, in order.
 //

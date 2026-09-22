@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -31,6 +32,12 @@ func Execute(args []string) int {
 	return executeWith(os.Stderr, os.Stdout, args)
 }
 
+// ExecuteWith is Execute with injectable output streams, so the binary's run()
+// wrapper and tests can drive the real CLI without touching the process streams.
+func ExecuteWith(args []string, stdout, stderr io.Writer) int {
+	return executeWith(stderr, stdout, args)
+}
+
 // executeTo is Execute with an explicit error sink, so tests can assert the
 // rendered operator-facing message.
 func executeTo(stderr io.Writer, args []string) int {
@@ -43,8 +50,12 @@ func executeToWithStdout(stdout io.Writer, args []string) int {
 	return executeWith(os.Stderr, stdout, args)
 }
 
+// newBundle is a seam over i18n.New so a test can force a catalog failure and
+// reach executeWith's bootstrap-error branch. Production uses i18n.New.
+var newBundle = i18n.New
+
 func executeWith(stderr, stdout io.Writer, args []string) int {
-	bundle, err := i18n.New()
+	bundle, err := newBundle()
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, i18n.RedactString(err.Error()))
 		return 1
@@ -111,25 +122,33 @@ type serveFlags struct {
 	allowRemote bool
 }
 
+// serveRun is the seam the serve command uses to block on the listener. It is a
+// package variable so a test can drive the command without binding a socket.
+var serveRun = func(ctx context.Context, instance *app.App) error {
+	return instance.Run(ctx)
+}
+
+// changedServeFlags returns only the flags the user actually set, keyed by flag
+// name, so config.Load's precedence sees flags only when they were supplied.
+func changedServeFlags(cmd *cobra.Command) map[string]string {
+	out := map[string]string{}
+	for _, name := range []string{"host", "port", "allow-remote"} {
+		if f := cmd.Flags().Lookup(name); f != nil && f.Changed {
+			out[name] = f.Value.String()
+		}
+	}
+	return out
+}
+
 func newServeCmd() *cobra.Command {
 	flags := &serveFlags{}
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Start the Heimdall gateway and management API",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			flagVals := map[string]string{}
-			// Only flags the user actually set may override the file.
-			for name := range map[string]struct{}{
-				"host": {}, "port": {}, "allow-remote": {},
-			} {
-				if f := cmd.Flags().Lookup(name); f != nil && f.Changed {
-					flagVals[name] = f.Value.String()
-				}
-			}
-
 			cfg, err := config.Load(config.Options{
 				FilePath: flags.configPath,
-				Flags:    flagVals,
+				Flags:    changedServeFlags(cmd),
 				Env:      environ(),
 			})
 			if err != nil {
@@ -147,7 +166,7 @@ func newServeCmd() *cobra.Command {
 
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
-			return instance.Run(ctx)
+			return serveRun(ctx, instance)
 		},
 	}
 

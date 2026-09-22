@@ -26,11 +26,18 @@ type migration struct {
 // schema_version. Each step runs in its own transaction, so a failure leaves
 // the database at the last good version rather than half-migrated.
 func (s *Store) Migrate() error {
+	return s.migrateFrom(migrationsFS)
+}
+
+// migrateFrom is Migrate with an injectable migration source. Production passes
+// the embedded FS; a test passes an fs.FS so the malformed-name, duplicate-
+// version and bad-SQL branches are reachable without shipping bad SQL.
+func (s *Store) migrateFrom(fsys fs.FS) error {
 	current, err := s.schemaVersion()
 	if err != nil {
 		return err
 	}
-	steps, err := loadMigrations()
+	steps, err := loadMigrations(fsys)
 	if err != nil {
 		return err
 	}
@@ -88,11 +95,11 @@ func (s *Store) schemaVersion() (int, error) {
 	return n, nil
 }
 
-// loadMigrations reads and orders the embedded migration files. The numeric
-// prefix of the filename is the version; a malformed name is an error, not a
-// silent skip.
-func loadMigrations() ([]migration, error) {
-	entries, err := fs.ReadDir(migrationsFS, "migrations")
+// loadMigrations reads and orders the migration files under migrations/. The
+// numeric prefix of the filename is the version; a malformed name is an error,
+// not a silent skip.
+func loadMigrations(fsys fs.FS) ([]migration, error) {
+	entries, err := fs.ReadDir(fsys, "migrations")
 	if err != nil {
 		return nil, domain.New(domain.CodeStoreMigrateFailed,
 			domain.WithHTTPStatus(500), domain.WithCause(err),
@@ -117,7 +124,7 @@ func loadMigrations() ([]migration, error) {
 				domain.WithHTTPStatus(500), domain.WithCause(err),
 				domain.WithParams(map[string]string{"reason": "bad migration version " + e.Name()}))
 		}
-		body, err := migrationsFS.ReadFile(path.Join("migrations", e.Name()))
+		body, err := fs.ReadFile(fsys, path.Join("migrations", e.Name()))
 		if err != nil {
 			return nil, domain.New(domain.CodeStoreMigrateFailed,
 				domain.WithHTTPStatus(500), domain.WithCause(err),

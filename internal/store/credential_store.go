@@ -118,7 +118,7 @@ func (c *CredentialStore) Upsert(ctx context.Context, cred contracts.Credential)
 		)
 	}
 
-	metaJSON, err := json.Marshal(cred.Meta)
+	metaJSON, err := marshalMeta(cred.Meta)
 	if err != nil {
 		return credentialError("upsert", err)
 	}
@@ -211,6 +211,15 @@ func scanCredential(s rowScanner) (contracts.Credential, error) {
 		}
 	}
 
+	createdAt, err := parseTime(created)
+	if err != nil {
+		return contracts.Credential{}, corruptedTimeError(id, "created_at", created, err)
+	}
+	expiresAt, err := parseTime(expires)
+	if err != nil {
+		return contracts.Credential{}, corruptedTimeError(id, "expires_at", expires, err)
+	}
+
 	return contracts.Credential{
 		ID:        domain.CredentialID(id),
 		Provider:  domain.ProviderID(provider),
@@ -218,8 +227,8 @@ func scanCredential(s rowScanner) (contracts.Credential, error) {
 		Label:     label,
 		Meta:      accountMeta,
 		Sealed:    []byte(secret),
-		CreatedAt: parseTime(created),
-		ExpiresAt: parseTime(expires),
+		CreatedAt: createdAt,
+		ExpiresAt: expiresAt,
 	}, nil
 }
 
@@ -251,16 +260,39 @@ func formatTime(t time.Time) string {
 	return t.UTC().Format(time.RFC3339Nano)
 }
 
-func parseTime(s string) time.Time {
+// parseTime decodes a persisted timestamp. An empty string is the legitimate
+// "unknown / no expiry" sentinel and maps to the zero time. A NON-empty string
+// that does not parse is corruption and is returned as an error: silently
+// yielding the zero time would turn a bad row into an apparently valid
+// credential with no expiry, which is worse than refusing to read it.
+func parseTime(s string) (time.Time, error) {
 	if s == "" {
-		return time.Time{}
+		return time.Time{}, nil
 	}
 	t, err := time.Parse(time.RFC3339Nano, s)
 	if err != nil {
-		return time.Time{}
+		return time.Time{}, err
 	}
-	return t
+	return t, nil
 }
+
+// corruptedTimeError is the typed error for an unparseable timestamp column. It
+// is a storage failure (ScopeRequest by the ADR-0002 rule for internal errors):
+// it must never cool down or invalidate a credential, it must surface the row.
+func corruptedTimeError(id, column, value string, cause error) error {
+	return domain.New(domain.CodeCredentialStoreFailed,
+		domain.WithHTTPStatus(500),
+		domain.WithCause(cause),
+		domain.WithParams(map[string]string{
+			"reason": fmt.Sprintf("credential %s has a corrupt %s (%q)", id, column, value),
+		}),
+	)
+}
+
+// marshalMeta is a seam over json.Marshal for AccountMeta. AccountMeta is all
+// strings and string slices, so json.Marshal cannot fail on it; the seam exists
+// only so the Upsert marshal-error branch is reachable in a test.
+var marshalMeta = func(m contracts.AccountMeta) ([]byte, error) { return json.Marshal(m) }
 
 func credentialError(op string, err error) error {
 	return domain.New(domain.CodeCredentialStoreFailed,

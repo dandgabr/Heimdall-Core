@@ -16,6 +16,14 @@ import (
 // file, equivalent to passing --config.
 const ConfigEnvVar = "HEIMDALL_CONFIG"
 
+// upgradeFn and statFn are seams. Upgrade's contract returns an error for a
+// future migration, and readFileValues probes os.Stat; in a healthy process
+// neither fails, so the error branches are only reachable by injection.
+var (
+	upgradeFn = Upgrade
+	statFn    = os.Stat
+)
+
 // defaultFileNames are searched, in order, when no path is supplied.
 var defaultFileNames = []string{"heimdall.toml", "config.toml"}
 
@@ -61,7 +69,7 @@ func Load(opts Options) (Config, error) {
 			)
 		}
 		if n < CurrentConfigVersion {
-			if fileVals, err = Upgrade(fileVals); err != nil {
+			if fileVals, err = upgradeFn(fileVals); err != nil {
 				return Config{}, err
 			}
 		}
@@ -95,7 +103,7 @@ func readFileValues(opts Options) (map[string]string, error) {
 	}
 	if path == "" {
 		for _, name := range defaultFileNames {
-			if _, err := os.Stat(name); err == nil {
+			if _, err := statFn(name); err == nil {
 				path = name
 				break
 			}
@@ -105,7 +113,7 @@ func readFileValues(opts Options) (map[string]string, error) {
 		return map[string]string{}, nil
 	}
 
-	if _, err := os.Stat(path); err != nil {
+	if _, err := statFn(path); err != nil {
 		if explicit {
 			return nil, domain.New(domain.CodeConfigLoadFailed,
 				domain.WithHTTPStatus(500),

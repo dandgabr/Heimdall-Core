@@ -108,9 +108,14 @@ func (c *Client) Stream(ctx context.Context, body []byte, w http.ResponseWriter)
 				if errors.Is(readErr, io.EOF) {
 					return
 				}
+				// Either hand the error to the main loop or give up because the
+				// context was cancelled; both paths end this goroutine. The
+				// explicit return in the Done arm keeps the branch a real,
+				// testable block rather than an empty no-op arm.
 				select {
 				case chunks <- chunk{err: readErr}:
 				case <-pumpCtx.Done():
+					return
 				}
 				return
 			}

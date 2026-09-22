@@ -120,11 +120,12 @@ func (s *Store) RotateTo(newKEK []byte, sample string) (*Store, error) {
 			domain.WithHTTPStatus(500),
 		)
 	}
-	if len(newKEK) != KEKSize {
-		return nil, domain.New(domain.CodeSecretKDFFailed,
-			domain.WithHTTPStatus(500),
-			domain.WithParams(map[string]string{"reason": "kek is not 32 bytes"}),
-		)
+	// NewWithKEK is the SINGLE authority on the new KEK's length: it rejects a
+	// non-32-byte key up front with the specific error, so RotateTo does not
+	// duplicate the check. This is the branch a bad rotation input hits.
+	next, err := NewWithKEK(newKEK)
+	if err != nil {
+		return nil, err
 	}
 
 	// Prove the current key can read the sample (or that a fresh probe
@@ -142,10 +143,6 @@ func (s *Store) RotateTo(newKEK []byte, sample string) (*Store, error) {
 
 	// Prove the new key round-trips through the same format before adopting it.
 	rewrapped, err := Rewrap(s.kek, newKEK, probe)
-	if err != nil {
-		return nil, err
-	}
-	next, err := NewWithKEK(newKEK)
 	if err != nil {
 		return nil, err
 	}

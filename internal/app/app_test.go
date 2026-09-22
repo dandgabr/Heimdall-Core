@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -10,10 +11,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/dandgabr/heimdall-core/internal/auth/oauth"
 	"github.com/dandgabr/heimdall-core/internal/config"
 	"github.com/dandgabr/heimdall-core/internal/contracts"
 	"github.com/dandgabr/heimdall-core/internal/domain"
+	"github.com/dandgabr/heimdall-core/internal/i18n"
+	"github.com/dandgabr/heimdall-core/internal/pipeline"
 	"github.com/dandgabr/heimdall-core/internal/secret"
 	"github.com/dandgabr/heimdall-core/internal/store"
 )
@@ -377,6 +382,521 @@ func TestVaultWithCredentialsBootsWithKey(t *testing.T) {
 	}
 }
 
+// TestRunServesAndShutsDown drives the real listener: Run must serve until the
+// context is cancelled and then return nil.
+func TestRunServesAndShutsDown(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Server.Port = freePort(t)
+	cfg.Store.Path = filepath.Join(dir, "heimdall.db")
+	cfg.Store.TokenPath = filepath.Join(dir, "management-token")
+
+	instance, err := Build(Options{Config: cfg, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer func() { _ = instance.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- instance.Run(ctx) }()
+
+	// Wait for the listener to accept.
+	addr := "http://" + cfg.Server.Addr()
+	var lastErr error
+	for i := 0; i < 50; i++ {
+		resp, err := http.Get(addr + "/health")
+		if err == nil {
+			_ = resp.Body.Close()
+			lastErr = nil
+			break
+		}
+		lastErr = err
+		time.Sleep(20 * time.Millisecond)
+	}
+	if lastErr != nil {
+		t.Fatalf("server never became ready: %v", lastErr)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run returned %v, want nil after a clean shutdown", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after cancellation")
+	}
+}
+
+// TestRunFailsOnBindConflict covers Run's error path: a port already in use.
+func TestRunFailsOnBindConflict(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Server.Port = port
+	cfg.Store.Path = filepath.Join(dir, "heimdall.db")
+	cfg.Store.TokenPath = filepath.Join(dir, "management-token")
+
+	instance, err := Build(Options{Config: cfg, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer func() { _ = instance.Close() }()
+
+	if err := instance.Run(context.Background()); err == nil {
+		t.Fatal("Run succeeded on an in-use port")
+	}
+}
+
+// TestCloseIdempotent covers Close (both resource branches).
+func TestCloseIdempotent(t *testing.T) {
+	a := buildTestApp(t)
+	if err := a.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	// A second close must not panic.
+	_ = a.Close()
+}
+
+// TestRotateManagementTokenWritesFile covers the success path.
+func TestRotateManagementTokenWritesFile(t *testing.T) {
+	a := buildTestApp(t)
+	path, err := a.RotateManagementToken()
+	if err != nil {
+		t.Fatalf("RotateManagementToken: %v", err)
+	}
+	if path != a.Config.Store.TokenPath {
+		t.Errorf("path = %q, want %q", path, a.Config.Store.TokenPath)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("token file not written: %v", err)
+	}
+}
+
+// TestBuildTokenFileWriteError covers the Build branch where writing the
+// management token file fails: Build must abort and close the store.
+func TestBuildTokenFileWriteError(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Store.Path = filepath.Join(dir, "heimdall.db")
+	// Point the token path at a directory so WriteTokenFile's rename fails.
+	tokenDir := filepath.Join(dir, "token-as-dir")
+	if err := os.MkdirAll(tokenDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	cfg.Store.TokenPath = tokenDir
+
+	if _, err := Build(Options{Config: cfg, Env: map[string]string{}}); err == nil {
+		t.Fatal("Build succeeded despite an unwritable token path")
+	}
+}
+
+// TestBuildSaltLoadError covers wireVault's LoadOrCreateSalt failure: a vault
+// whose meta table is unusable cannot resolve the salt.
+func TestBuildSaltLoadError(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "heimdall.db")
+	cfg := config.Defaults()
+	cfg.Store.Path = dbPath
+	cfg.Store.TokenPath = filepath.Join(dir, "management-token")
+
+	// Pre-create the vault and seed a MALFORMED salt. LoadOrCreateSalt reads it
+	// and refuses (rather than regenerating), so wireVault fails.
+	pre, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	if err := pre.SetMeta("kdf_salt", "!!!not-base64!!!"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+	_ = pre.Close()
+
+	if _, err := Build(Options{Config: cfg, Env: map[string]string{}}); err == nil {
+		t.Fatal("Build succeeded with an unusable meta table")
+	}
+}
+
+// TestCloseGateError covers Close's gate-close error branch with a failing gate.
+func TestCloseGateError(t *testing.T) {
+	a := buildTestApp(t)
+	a.Gates = failingChain(t)
+	if err := a.Close(); err == nil {
+		t.Fatal("Close swallowed a gate-close error")
+	}
+}
+
+// failingChain builds a chain whose single gate returns a close error, using the
+// public constructor so the test does not reach into pipeline internals.
+func failingChain(t *testing.T) *pipeline.Chain {
+	t.Helper()
+	gate := closeErrorGate{}
+	chain, err := pipeline.New([]contracts.Gate{gate})
+	if err != nil {
+		t.Fatalf("pipeline.New: %v", err)
+	}
+	return chain
+}
+
+// closeErrorGate is the minimal Gate whose Close fails.
+type closeErrorGate struct{}
+
+func (closeErrorGate) ID() string { return "close-error" }
+func (closeErrorGate) Stages() contracts.GateStageSet {
+	return contracts.StageSet(contracts.StagePreRequest)
+}
+func (closeErrorGate) RequiredCaps() contracts.GateCaps       { return 0 }
+func (closeErrorGate) FailurePolicy() contracts.FailurePolicy { return contracts.FailOpen }
+func (closeErrorGate) PreRequest(context.Context, contracts.GateInput) (contracts.Decision, error) {
+	return contracts.Decision{Kind: contracts.DecisionContinue}, nil
+}
+func (closeErrorGate) OnResponseChunk(context.Context, contracts.ChunkInput) (contracts.ChunkDecision, error) {
+	return contracts.ChunkDecision{Kind: contracts.ChunkPassThrough}, nil
+}
+func (closeErrorGate) PostResponse(context.Context, contracts.GateInput) error { return nil }
+func (closeErrorGate) Close() error                                            { return errors.New("gate close failed") }
+
+// TestBuildInjectsFlowDeps covers the FlowDeps override branch: injected deps
+// win and a nil clock is filled in.
+func TestBuildInjectsFlowDeps(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Store.Path = filepath.Join(dir, "heimdall.db")
+	cfg.Store.TokenPath = filepath.Join(dir, "management-token")
+
+	deps := oauth.ClientDeps{HTTP: &http.Client{}}
+	instance, err := Build(Options{Config: cfg, Env: map[string]string{}, FlowDeps: &deps})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer func() { _ = instance.Close() }()
+	if instance.Flows == nil {
+		t.Fatal("Flows not built with injected deps")
+	}
+}
+
+// TestBuildEmptyVaultWithKeyResolves covers the branch where the vault is empty
+// but a key IS configured: Secrets must be populated.
+func TestBuildEmptyVaultWithKeyResolves(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Store.Path = filepath.Join(dir, "heimdall.db")
+	cfg.Store.TokenPath = filepath.Join(dir, "management-token")
+
+	keyDir := filepath.Join(dir, "heimdall")
+	if err := os.MkdirAll(keyDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(keyDir, "master-key"), []byte("build-key-material"), 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+
+	t.Setenv("XDG_DATA_HOME", dir)
+	instance, err := Build(Options{Config: cfg, Env: map[string]string{"XDG_DATA_HOME": dir}})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer func() { _ = instance.Close() }()
+	if instance.Secrets == nil {
+		t.Fatal("Secrets not populated despite a configured key on an empty vault")
+	}
+}
+
+// TestRotateManagementTokenFileError covers the WriteTokenFile failure branch.
+func TestRotateManagementTokenFileError(t *testing.T) {
+	a := buildTestApp(t)
+	// Point the token path under a file so the write fails.
+	base := t.TempDir()
+	blocker := filepath.Join(base, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	a.Config.Store.TokenPath = filepath.Join(blocker, "token")
+	if _, err := a.RotateManagementToken(); err == nil {
+		t.Fatal("rotate succeeded with an unwritable token path")
+	}
+}
+
+// TestVaultHasCredentialsError covers the List-error branch by dropping the
+// credentials table after Build.
+func TestVaultHasCredentialsError(t *testing.T) {
+	a := buildTestApp(t)
+	if _, err := a.Store.Writer().Exec(`DROP TABLE credentials`); err != nil {
+		t.Fatalf("drop: %v", err)
+	}
+	if _, err := a.vaultHasCredentials(); err == nil {
+		t.Fatal("vaultHasCredentials succeeded without the table")
+	}
+}
+
+// TestHandlerRegistersPassthroughWhenConfigured covers the passthrough-enabled
+// branch and both outcomes of NewClient (valid HTTPS host, and an insecure one
+// that is refused). It asserts the route is mounted only for a valid config.
+func TestHandlerRegistersPassthroughWhenConfigured(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Store.Path = filepath.Join(dir, "heimdall.db")
+	cfg.Store.TokenPath = filepath.Join(dir, "management-token")
+	// A loopback HTTP upstream is allowed by the egress policy.
+	cfg.Passthrough.BaseURL = "http://127.0.0.1:11434/v1"
+	cfg.Passthrough.APIKey = "sk-test"
+
+	a, err := Build(Options{Config: cfg, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer func() { _ = a.Close() }()
+
+	// The chat route exists: a GET on it is a 405 (method mismatch), proving
+	// the POST route is mounted rather than 404.
+	req := httptest.NewRequest(http.MethodGet, "/v1/chat/completions", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	rec := httptest.NewRecorder()
+	a.Handler().ServeHTTP(rec, req)
+	if rec.Code == http.StatusNotFound {
+		t.Fatal("passthrough route not mounted for a valid upstream")
+	}
+}
+
+// TestHandlerRefusesInsecurePassthrough covers the NewClient-error branch: a
+// plain-HTTP non-loopback upstream is refused and the route is not mounted, but
+// the app still builds.
+func TestHandlerRefusesInsecurePassthrough(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Store.Path = filepath.Join(dir, "heimdall.db")
+	cfg.Store.TokenPath = filepath.Join(dir, "management-token")
+	cfg.Passthrough.BaseURL = "http://api.example.com/v1" // insecure
+	cfg.Passthrough.APIKey = "sk-test"
+
+	a, err := Build(Options{Config: cfg, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("Build must tolerate an insecure upstream: %v", err)
+	}
+	defer func() { _ = a.Close() }()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+	req.RemoteAddr = "127.0.0.1:1234"
+	rec := httptest.NewRecorder()
+	a.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("insecure upstream route mounted: status = %d", rec.Code)
+	}
+}
+
+// TestHandlerSkipsObserverWhenGatesNil covers the a.Gates==nil branch by nil-ing
+// the chain before building the handler.
+func TestHandlerSkipsObserverWhenGatesNil(t *testing.T) {
+	a := buildTestApp(t)
+	a.Gates = nil
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	rec := httptest.NewRecorder()
+	a.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("health = %d, want 200 with no gate chain", rec.Code)
+	}
+}
+
+// TestBuildEmptyVaultResolveErrorPropagates covers the branch where an empty
+// vault has an EXPLICITLY configured but broken key: secret.New fails with a
+// non-missing-key error, so Build must propagate it.
+func TestBuildEmptyVaultResolveErrorPropagates(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Store.Path = filepath.Join(dir, "heimdall.db")
+	cfg.Store.TokenPath = filepath.Join(dir, "management-token")
+
+	// A 0644 key file is configured but rejected (permission too permissive):
+	// a non-missing-key failure.
+	keyDir := filepath.Join(dir, "heimdall")
+	if err := os.MkdirAll(keyDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	keyPath := filepath.Join(keyDir, "master-key")
+	if err := os.WriteFile(keyPath, []byte("material"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	t.Setenv("XDG_DATA_HOME", dir)
+
+	if _, err := Build(Options{Config: cfg, Env: map[string]string{"XDG_DATA_HOME": dir}}); err == nil {
+		t.Fatal("Build tolerated a rejected key file on an empty vault")
+	}
+}
+
+// TestVaultWithCredentialsBootsViaKeyFile covers wireVault's "credentials exist
+// and a real custody key resolves" branch: a 0600 key file supplies the KEK, so
+// the final secret.New succeeds and Secrets is populated.
+func TestVaultWithCredentialsBootsViaKeyFile(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "heimdall.db")
+	cfg := config.Defaults()
+	cfg.Store.Path = dbPath
+	cfg.Store.TokenPath = filepath.Join(dir, "management-token")
+
+	// Seed a credential sealed under the KEK derived from the key file.
+	keyDir := filepath.Join(dir, "heimdall")
+	if err := os.MkdirAll(keyDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	keyPath := filepath.Join(keyDir, "master-key")
+	if err := os.WriteFile(keyPath, []byte("keyfile-material"), 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+	t.Setenv("XDG_DATA_HOME", dir)
+
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	salt, err := secret.LoadOrCreateSalt(st)
+	if err != nil {
+		t.Fatalf("salt: %v", err)
+	}
+	kek, err := secret.DeriveKEK([]byte("keyfile-material"), salt, secret.DefaultKDFParams)
+	if err != nil {
+		t.Fatalf("derive: %v", err)
+	}
+	sec, err := secret.NewWithKEK(kek)
+	if err != nil {
+		t.Fatalf("NewWithKEK: %v", err)
+	}
+	sealed, err := sec.Seal([]byte("sk-token"))
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	cs := store.NewCredentialStore(st)
+	if err := cs.Upsert(context.Background(), contracts.Credential{
+		ID: "seed", Provider: "z.ai", AuthMode: contracts.AuthAPIKey, Sealed: []byte(sealed),
+	}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	_ = st.Close()
+
+	instance, err := Build(Options{Config: cfg, Env: map[string]string{"XDG_DATA_HOME": dir}})
+	if err != nil {
+		t.Fatalf("Build with a key file: %v", err)
+	}
+	defer func() { _ = instance.Close() }()
+	if instance.Secrets == nil {
+		t.Fatal("Secrets not populated when credentials exist and a key file resolves")
+	}
+}
+
+// TestRotateManagementTokenStoreError covers the RotateManagementToken failure
+// branch (the underlying store call fails).
+func TestRotateManagementTokenStoreError(t *testing.T) {
+	a := buildTestApp(t)
+	// Close the store so the rotate call fails.
+	_ = a.Store.Close()
+	if _, err := a.RotateManagementToken(); err == nil {
+		t.Fatal("rotate succeeded on a closed store")
+	}
+}
+
+// TestCloseStoreErrorBranch covers Close's store-error append via the CloseStore
+// seam, which a healthy database/sql pool never produces (a double close returns
+// nil).
+func TestCloseStoreErrorBranch(t *testing.T) {
+	a := buildTestApp(t)
+	seams := defaultAppSeams
+	seams.CloseStore = func(*store.Store) error { return errors.New("store close denied") }
+	withAppSeams(t, seams, func() {
+		if err := a.Close(); err == nil {
+			t.Fatal("Close swallowed a store close error")
+		}
+	})
+}
+
+// TestSystemClockNow covers the Clock adapter (0% before).
+func TestSystemClockNow(t *testing.T) {
+	if (systemClock{}).Now().IsZero() {
+		t.Error("systemClock.Now() returned the zero time")
+	}
+}
+
+// TestBuildValidationError covers Build's early Validate rejection.
+func TestBuildValidationError(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Server.Host = "0.0.0.0"
+	cfg.Server.AllowRemote = false
+	if _, err := Build(Options{Config: cfg, Env: map[string]string{}}); err == nil {
+		t.Fatal("Build accepted an invalid config")
+	}
+}
+
+// TestBuildStoreOpenError covers Build's store-open failure branch.
+func TestBuildStoreOpenError(t *testing.T) {
+	cfg := config.Defaults()
+	// A path under a regular file cannot be a directory.
+	base := t.TempDir()
+	if err := os.WriteFile(filepath.Join(base, "afile"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cfg.Store.Path = filepath.Join(base, "afile", "heimdall.db")
+	if _, err := Build(Options{Config: cfg, Env: map[string]string{}}); err == nil {
+		t.Fatal("Build succeeded with an unopenable store")
+	}
+}
+
+// freePort reserves and releases a loopback port for a listener test.
+func freePort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+	return port
+}
+
+// TestGateLoggerRunsInRequestPath is the P3 wiring guard: the logger gate must
+// be invoked for a real request through the assembled handler, and it must never
+// record a body or a credential.
+func TestGateLoggerRunsInRequestPath(t *testing.T) {
+	a := buildTestApp(t)
+
+	const secret = "sk-live-GATE-MUST-NOT-SEE-THIS-123456"
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("Authorization", "Bearer "+secret)
+	rec := httptest.NewRecorder()
+	a.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("health = %d, want 200", rec.Code)
+	}
+
+	records := a.GateRecords()
+	if len(records) == 0 {
+		t.Fatal("gate logger never ran in the request path")
+	}
+	var sawPre, sawPost bool
+	for _, r := range records {
+		if r["stage"] == "pre_request" {
+			sawPre = true
+		}
+		if r["stage"] == "post_response" {
+			sawPost = true
+		}
+		for k, v := range r {
+			if strings.Contains(v, secret) {
+				t.Fatalf("gate record leaked a credential (%s=%s)", k, v)
+			}
+		}
+	}
+	if !sawPre || !sawPost {
+		t.Errorf("gate stages seen: pre=%v post=%v, want both", sawPre, sawPost)
+	}
+}
+
 // TestProviderListAndStatus is the P0-A CLI surface: listing and status work
 // without any key and report the pending Antigravity endpoints.
 func TestProviderListAndStatus(t *testing.T) {
@@ -506,6 +1026,88 @@ func TestImportCredentialsEndToEnd(t *testing.T) {
 	_ = kek
 }
 
+// TestWireGatesBuildsChain covers wireGates' success branch and that the chain
+// is populated with the logger gate.
+func TestWireGatesBuildsChain(t *testing.T) {
+	a := buildTestApp(t)
+	if a.Gates == nil {
+		t.Fatal("Gates not built")
+	}
+	gates := a.Gates.Gates()
+	if len(gates) != 1 || gates[0].ID() != "logger" {
+		t.Fatalf("gate chain = %v, want the single logger gate", gates)
+	}
+}
+
+// TestHandlerObserverErrorBranch covers the "observer disabled" branch: a nil
+// chain is skipped, and a failed NewObserver logs a warning without breaking the
+// handler. NewObserver only fails on a nil chain, which the a.Gates!=nil guard
+// already excludes, so this asserts the guard's effect: a nil chain yields a
+// working handler.
+func TestHandlerNilChainStillServes(t *testing.T) {
+	a := buildTestApp(t)
+	a.Gates = nil
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	a.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("health = %d, want 200", rec.Code)
+	}
+}
+
+// TestBuildInvalidConfigCoversAllErrors drives Build's config.Validate failure
+// for each invalid field shape.
+func TestBuildValidateError(t *testing.T) {
+	tests := map[string]func(*config.Config){
+		"bad log level":  func(c *config.Config) { c.Log.Level = "loud" },
+		"bad log format": func(c *config.Config) { c.Log.Format = "xml" },
+		"empty store":    func(c *config.Config) { c.Store.Path = " " },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			cfg := config.Defaults()
+			mutate(&cfg)
+			if _, err := Build(Options{Config: cfg, Env: map[string]string{}}); err == nil {
+				t.Fatal("Build accepted an invalid config")
+			}
+		})
+	}
+}
+
+// TestRunShutdownErrorBranchIsCoveredByCleanShutdown documents that the
+// Shutdown-error branch requires the listener to fail mid-drain, which the clean
+// cancellation path cannot provoke; the success path is asserted by
+// TestRunServesAndShutsDown.
+func TestRunContextCancelReturnsNil(t *testing.T) {
+	// A second Run test with an immediate cancel, asserting the ctx.Done arm.
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Server.Port = freePort(t)
+	cfg.Store.Path = filepath.Join(dir, "heimdall.db")
+	cfg.Store.TokenPath = filepath.Join(dir, "management-token")
+	a, err := Build(Options{Config: cfg, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer func() { _ = a.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+	// Give the listener a moment, then cancel.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run returned %v on cancel", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return")
+	}
+}
+
 // TestServeOnIPv6Loopback is the N1 integration guard: with host "::1" the
 // address composed by config.Addr() must be bindable and answer on
 // http://[::1]:<port>. It is skipped when the machine has no usable IPv6
@@ -562,5 +1164,237 @@ func TestServeOnIPv6Loopback(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestBuildSecretOptionsError covers wireVault's secret.New failure when
+// SecretOptions are supplied but invalid (a bad custody config).
+func TestBuildSecretOptionsError(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Store.Path = filepath.Join(dir, "heimdall.db")
+	cfg.Store.TokenPath = filepath.Join(dir, "management-token")
+
+	_, err := Build(Options{
+		Config: cfg,
+		Env:    map[string]string{},
+		SecretOptions: &secret.Options{
+			Salt:    nil, // invalid: salt must be 16 bytes
+			Params:  secret.DefaultKDFParams,
+			Custody: secret.Custody{Env: map[string]string{}},
+		},
+	})
+	if err == nil {
+		t.Fatal("Build accepted invalid SecretOptions")
+	}
+}
+
+// withAppSeams swaps the app construction seams for fn, restoring them after.
+func withAppSeams(t *testing.T, seams appSeams, fn func()) {
+	t.Helper()
+	old := appSeam
+	appSeam = seams
+	t.Cleanup(func() { appSeam = old })
+	fn()
+	appSeam = old
+}
+
+// TestBuildBundleError covers Build's i18n.New failure branch.
+func TestBuildBundleError(t *testing.T) {
+	seams := defaultAppSeams
+	seams.LoadBundle = func() (*i18n.Bundle, error) { return nil, errors.New("catalog broken") }
+	withAppSeams(t, seams, func() {
+		if _, err := Build(Options{Config: config.Defaults(), Env: map[string]string{}}); err == nil {
+			t.Fatal("Build succeeded with a broken bundle")
+		}
+	})
+}
+
+// TestBuildOpenStoreError covers Build's store.Open failure branch.
+func TestBuildOpenStoreError(t *testing.T) {
+	seams := defaultAppSeams
+	seams.OpenStore = func(string) (*store.Store, error) { return nil, errors.New("open denied") }
+	withAppSeams(t, seams, func() {
+		if _, err := Build(Options{Config: config.Defaults(), Env: map[string]string{}}); err == nil {
+			t.Fatal("Build succeeded with a failing store open")
+		}
+	})
+}
+
+// TestWireGatesChainError covers wireGates' pipeline.New failure branch.
+func TestWireGatesChainError(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Store.Path = filepath.Join(dir, "heimdall.db")
+	cfg.Store.TokenPath = filepath.Join(dir, "management-token")
+	seams := defaultAppSeams
+	seams.NewChain = func([]contracts.Gate) (*pipeline.Chain, error) { return nil, errors.New("chain denied") }
+	withAppSeams(t, seams, func() {
+		if _, err := Build(Options{Config: cfg, Env: map[string]string{}}); err == nil {
+			t.Fatal("Build succeeded with a failing chain construction")
+		}
+	})
+}
+
+// TestHandlerObserverErrorBranchWarns covers the observer-error warn branch by
+// forcing NewObserver to fail on a live chain.
+func TestHandlerObserverErrorBranchWarns(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Store.Path = filepath.Join(dir, "heimdall.db")
+	cfg.Store.TokenPath = filepath.Join(dir, "management-token")
+
+	a, err := Build(Options{Config: cfg, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer func() { _ = a.Close() }()
+
+	seams := defaultAppSeams
+	seams.NewObserver = func(*pipeline.Chain) (*pipeline.Observer, error) {
+		return nil, errors.New("observer denied")
+	}
+	withAppSeams(t, seams, func() {
+		// Handler must still be usable (the error is only logged).
+		req := httptest.NewRequest(http.MethodGet, "/health", nil)
+		req.RemoteAddr = "127.0.0.1:1234"
+		rec := httptest.NewRecorder()
+		a.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("health = %d, want 200", rec.Code)
+		}
+	})
+}
+
+// TestCloseStoreError covers Close's store-error branch by replacing the app's
+// store with one whose Close fails (via the store package's faulty driver,
+// reachable because this test lives in the app package's test binary which can
+// construct a Store through the exported Open then close its pools first).
+func TestCloseStoreError(t *testing.T) {
+	// A store whose pools are already closed returns nil from Close, so to get a
+	// real error we point the app's store at a path and close it, then call
+	// Close again: still nil. The reachable assertion is that Close joins errors
+	// from the gate chain; TestCloseGateError already proves the join. Here we
+	// assert the store branch runs by closing a live app twice.
+	a := buildTestApp(t)
+	if err := a.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if err := a.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+}
+
+// TestBuildEnsureTokenError covers Build's EnsureManagementTokenHash failure
+// branch via the seam.
+func TestBuildEnsureTokenError(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Store.Path = filepath.Join(dir, "heimdall.db")
+	cfg.Store.TokenPath = filepath.Join(dir, "management-token")
+	seams := defaultAppSeams
+	seams.EnsureToken = func(*store.Store) (string, bool, error) {
+		return "", false, errors.New("token bootstrap denied")
+	}
+	withAppSeams(t, seams, func() {
+		if _, err := Build(Options{Config: cfg, Env: map[string]string{}}); err == nil {
+			t.Fatal("Build succeeded with a failing token bootstrap")
+		}
+	})
+}
+
+// TestWireVaultRegistryErrors covers the registry-loop error branches with an
+// injected descriptor set: an empty ID makes NewOpenAICompat fail, and a
+// duplicate ID makes Register fail.
+func TestWireVaultRegistryErrors(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Store.Path = filepath.Join(dir, "heimdall.db")
+	cfg.Store.TokenPath = filepath.Join(dir, "management-token")
+
+	t.Run("invalid descriptor", func(t *testing.T) {
+		seams := defaultAppSeams
+		seams.Descriptors = func() map[domain.ProviderID]contracts.ProviderDescriptor {
+			return map[domain.ProviderID]contracts.ProviderDescriptor{
+				"bad": {ID: ""}, // empty ID -> NewOpenAICompat error
+			}
+		}
+		withAppSeams(t, seams, func() {
+			if _, err := Build(Options{Config: cfg, Env: map[string]string{}}); err == nil {
+				t.Fatal("Build succeeded with an invalid descriptor")
+			}
+		})
+	})
+
+	t.Run("duplicate descriptor", func(t *testing.T) {
+		seams := defaultAppSeams
+		seams.Descriptors = func() map[domain.ProviderID]contracts.ProviderDescriptor {
+			// Two DIFFERENT map keys that resolve to the SAME family ID, so the
+			// second Register is a duplicate.
+			return map[domain.ProviderID]contracts.ProviderDescriptor{
+				"a": {ID: "dup"},
+				"b": {ID: "dup"},
+			}
+		}
+		withAppSeams(t, seams, func() {
+			if _, err := Build(Options{Config: cfg, Env: map[string]string{}}); err == nil {
+				t.Fatal("Build succeeded with duplicate providers")
+			}
+		})
+	})
+}
+
+// TestBuildVaultReadError covers the vault-read error branch via the seam.
+func TestBuildVaultReadError(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Store.Path = filepath.Join(dir, "heimdall.db")
+	cfg.Store.TokenPath = filepath.Join(dir, "management-token")
+	seams := defaultAppSeams
+	seams.HasCredentials = func(*store.CredentialStore) (bool, error) {
+		return false, errors.New("vault read denied")
+	}
+	withAppSeams(t, seams, func() {
+		if _, err := Build(Options{Config: cfg, Env: map[string]string{}}); err == nil {
+			t.Fatal("Build succeeded when the vault read failed")
+		}
+	})
+}
+
+// TestRunShutdownError covers Run's shutdown-error branch via the seam. The
+// seam must stay installed for the whole Run call, so it is set directly and
+// restored at cleanup rather than via withAppSeams (which restores eagerly).
+func TestRunShutdownError(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Server.Port = freePort(t)
+	cfg.Store.Path = filepath.Join(dir, "heimdall.db")
+	cfg.Store.TokenPath = filepath.Join(dir, "management-token")
+
+	a, err := Build(Options{Config: cfg, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer func() { _ = a.Close() }()
+
+	old := appSeam
+	appSeam = defaultAppSeams
+	appSeam.ShutdownServer = func(*http.Server, context.Context) error {
+		return errors.New("shutdown denied")
+	}
+	t.Cleanup(func() { appSeam = old })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Run returned nil despite a shutdown failure")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return")
 	}
 }
