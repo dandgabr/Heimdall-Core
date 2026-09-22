@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,9 @@ import (
 	"testing"
 
 	"github.com/dandgabr/heimdall-core/internal/config"
+	"github.com/dandgabr/heimdall-core/internal/contracts"
+	"github.com/dandgabr/heimdall-core/internal/domain"
+	"github.com/dandgabr/heimdall-core/internal/secret"
 	"github.com/dandgabr/heimdall-core/internal/store"
 )
 
@@ -228,6 +232,278 @@ func TestMuxErrorsUseI18nEnvelope(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestEmptyVaultBootsWithoutKey is the P0-A rule: a fresh vault has nothing to
+// decrypt, so the daemon must come up without a master key.
+func TestEmptyVaultBootsWithoutKey(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Store.Path = filepath.Join(dir, "heimdall.db")
+	cfg.Store.TokenPath = filepath.Join(dir, "management-token")
+
+	instance, err := Build(Options{Config: cfg, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("empty vault must boot without a key: %v", err)
+	}
+	defer func() { _ = instance.Close() }()
+
+	if instance.Secrets != nil {
+		t.Error("Secrets must stay nil on an empty vault with no key configured")
+	}
+	if instance.Credentials == nil || instance.Providers == nil || instance.Flows == nil {
+		t.Error("vault layer not wired")
+	}
+	// Health still answers.
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	rec := httptest.NewRecorder()
+	instance.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("health = %d, want 200", rec.Code)
+	}
+}
+
+// TestVaultWithCredentialsRequiresKey is the P0-A fail-closed rule: once a
+// credential exists, a boot without the master key must be refused with
+// config.secret_missing.
+func TestVaultWithCredentialsRequiresKey(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "heimdall.db")
+	cfg := config.Defaults()
+	cfg.Store.Path = dbPath
+	cfg.Store.TokenPath = filepath.Join(dir, "management-token")
+
+	// Seal one credential under a fixed KEK.
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	salt, err := secret.LoadOrCreateSalt(st)
+	if err != nil {
+		t.Fatalf("salt: %v", err)
+	}
+	kek, err := secret.DeriveKEK([]byte("some-material"), salt,
+		secret.KDFParams{Memory: 8, Time: 1, Threads: 1, KeyLen: 32})
+	if err != nil {
+		t.Fatalf("derive: %v", err)
+	}
+	sec, err := secret.NewWithKEK(kek)
+	if err != nil {
+		t.Fatalf("NewWithKEK: %v", err)
+	}
+	sealed, err := sec.Seal([]byte("sk-live-token"))
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	cs := store.NewCredentialStore(st)
+	if err := cs.Upsert(context.Background(), contracts.Credential{
+		ID:       "cred-1",
+		Provider: "z.ai",
+		AuthMode: contracts.AuthAPIKey,
+		Sealed:   []byte(sealed),
+	}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	_ = st.Close()
+
+	// Now boot with NO custody layer configured: must refuse, fail-closed.
+	_, err = Build(Options{Config: cfg, Env: map[string]string{}})
+	if err == nil {
+		t.Fatal("boot succeeded with credentials but no key")
+	}
+	de, ok := err.(*domain.DomainError)
+	if !ok || de.Code != domain.CodeConfigSecretMissing {
+		t.Fatalf("err = %v, want config.secret_missing", err)
+	}
+}
+
+// TestVaultWithCredentialsBootsWithKey proves the inverse: supplying the KEK
+// lets the daemon come up and decrypt.
+func TestVaultWithCredentialsBootsWithKey(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "heimdall.db")
+	cfg := config.Defaults()
+	cfg.Store.Path = dbPath
+	cfg.Store.TokenPath = filepath.Join(dir, "management-token")
+
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	salt, _ := secret.LoadOrCreateSalt(st)
+	kek, _ := secret.DeriveKEK([]byte("boot-material"), salt,
+		secret.KDFParams{Memory: 8, Time: 1, Threads: 1, KeyLen: 32})
+	sec, _ := secret.NewWithKEK(kek)
+	sealed, _ := sec.Seal([]byte("sk-live-token"))
+	cs := store.NewCredentialStore(st)
+	if err := cs.Upsert(context.Background(), contracts.Credential{
+		ID:       "cred-1",
+		Provider: "z.ai",
+		AuthMode: contracts.AuthAPIKey,
+		Sealed:   []byte(sealed),
+	}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	_ = st.Close()
+
+	instance, err := Build(Options{
+		Config: cfg,
+		Env:    map[string]string{},
+		SecretOptions: &secret.Options{
+			Salt:   salt,
+			Params: secret.KDFParams{Memory: 8, Time: 1, Threads: 1, KeyLen: 32},
+			Custody: secret.Custody{
+				Env:              map[string]string{"HEIMDALL_MASTER_KEY": "boot-material"},
+				AllowEnvOverride: true,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("boot with a key: %v", err)
+	}
+	defer func() { _ = instance.Close() }()
+
+	if instance.Secrets == nil {
+		t.Fatal("Secrets not wired after a successful key resolution")
+	}
+	cred, err := instance.Credentials.Get(context.Background(), "cred-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	plain, err := instance.Secrets.Open(string(cred.Sealed))
+	if err != nil || string(plain) != "sk-live-token" {
+		t.Fatalf("decrypt = %q, %v", plain, err)
+	}
+}
+
+// TestProviderListAndStatus is the P0-A CLI surface: listing and status work
+// without any key and report the pending Antigravity endpoints.
+func TestProviderListAndStatus(t *testing.T) {
+	a := buildTestApp(t)
+
+	list := a.ProviderList()
+	if len(list) != 4 {
+		t.Fatalf("ProviderList = %d, want 4", len(list))
+	}
+	// Deterministic order.
+	wantOrder := []domain.ProviderID{"antigravity", "command-code", "ollama-cloud", "z.ai"}
+	for i, p := range list {
+		if p.ID != wantOrder[i] {
+			t.Fatalf("ProviderList[%d] = %s, want %s", i, p.ID, wantOrder[i])
+		}
+	}
+
+	var antigravity *ProviderSummary
+	for i := range list {
+		if list[i].ID == "antigravity" {
+			antigravity = &list[i]
+		}
+	}
+	if antigravity == nil || len(antigravity.PendingEndpoints) == 0 {
+		t.Fatal("antigravity pending endpoints not reported")
+	}
+	// Antigravity is OAuth, not API key: the listing must reflect the declared
+	// mode, not the family's default.
+	if len(antigravity.AuthModes) != 1 || antigravity.AuthModes[0] != "oauth" {
+		t.Errorf("antigravity auth modes = %v, want [oauth]", antigravity.AuthModes)
+	}
+	for _, p := range list {
+		if p.ID == "z.ai" {
+			if len(p.AuthModes) != 1 || p.AuthModes[0] != "api_key" {
+				t.Errorf("z.ai auth modes = %v, want [api_key]", p.AuthModes)
+			}
+		}
+	}
+
+	status := a.ProviderStatus()
+	var readyCount int
+	for _, s := range status {
+		if s.ID == "antigravity" {
+			if s.Ready {
+				t.Error("antigravity reported ready while endpoints are pending")
+			}
+			if s.ReasonCode != "auth.provider_pending_endpoints" {
+				t.Errorf("antigravity reason = %q", s.ReasonCode)
+			}
+		} else if s.Ready {
+			readyCount++
+		}
+	}
+	if readyCount != 3 {
+		t.Errorf("ready API-key providers = %d, want 3", readyCount)
+	}
+}
+
+// TestImportCredentialsRequiresKey: importing seals into the vault, so without a
+// KEK it must fail closed rather than write plaintext.
+func TestImportCredentialsRequiresKey(t *testing.T) {
+	a := buildTestApp(t) // empty vault, no Secrets
+	if _, err := a.ImportCredentials(context.Background()); err == nil {
+		t.Fatal("import succeeded without a KEK")
+	} else {
+		de, ok := err.(*domain.DomainError)
+		if !ok || de.Code != domain.CodeConfigSecretMissing {
+			t.Fatalf("err = %v, want config.secret_missing", err)
+		}
+	}
+}
+
+// TestImportCredentialsEndToEnd imports a synthetic opencode file through the
+// app and proves the vault now holds a sealed credential.
+func TestImportCredentialsEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	src := filepath.Join(home, ".local", "share", "opencode", "auth.json")
+	if err := os.MkdirAll(filepath.Dir(src), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(src, []byte(`{"zai-coding-plan":{"type":"api","key":"sk-imported-key-123"}}`), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	cfg := config.Defaults()
+	cfg.Store.Path = filepath.Join(dir, "heimdall.db")
+	cfg.Store.TokenPath = filepath.Join(dir, "management-token")
+
+	salt, _ := secret.NewSalt()
+	kek, _ := secret.DeriveKEK([]byte("import-material"), salt,
+		secret.KDFParams{Memory: 8, Time: 1, Threads: 1, KeyLen: 32})
+
+	instance, err := Build(Options{
+		Config: cfg,
+		Env:    map[string]string{"HEIMDALL_IMPORT_OPENCODE": src, "HOME": home},
+		SecretOptions: &secret.Options{
+			Salt:   salt,
+			Params: secret.KDFParams{Memory: 8, Time: 1, Threads: 1, KeyLen: 32},
+			Custody: secret.Custody{
+				KeyFilePath:      filepath.Join(dir, "master-key"),
+				AllowEnvOverride: true,
+				Env:              map[string]string{"HEIMDALL_MASTER_KEY": "import-material"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer func() { _ = instance.Close() }()
+
+	results, err := instance.ImportCredentials(context.Background())
+	if err != nil {
+		t.Fatalf("ImportCredentials: %v", err)
+	}
+	if len(results) != 1 || results[0].Provider != "z.ai" {
+		t.Fatalf("results = %+v", results)
+	}
+	cred, err := instance.Credentials.Get(context.Background(), results[0].CredentialID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	plain, err := instance.Secrets.Open(string(cred.Sealed))
+	if err != nil || string(plain) != "sk-imported-key-123" {
+		t.Fatalf("decrypt = %q, %v", plain, err)
+	}
+	_ = kek
 }
 
 // TestServeOnIPv6Loopback is the N1 integration guard: with host "::1" the

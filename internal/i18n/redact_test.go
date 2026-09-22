@@ -122,6 +122,47 @@ func TestRedactSecrets(t *testing.T) {
 			input:     "access_token eyJhbGciOiJIUzI1NiJ9.abc",
 			forbidden: "eyJhbGciOiJIUzI1NiJ9.abc",
 		},
+		// P1-D: OAuth flow secrets that previously leaked.
+		{
+			name:      "device code assignment",
+			input:     "device_code=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdef",
+			forbidden: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdef",
+		},
+		{
+			name:      "device code json",
+			input:     `{"device_code":"GHIJKLMNOPQRSTUVWXYZ0123456789abcdefghij"}`,
+			forbidden: "GHIJKLMNOPQRSTUVWXYZ0123456789abcdefghij",
+		},
+		{
+			name:      "user code",
+			input:     "user_code=WXYZ-1234-ABCD",
+			forbidden: "WXYZ-1234-ABCD",
+		},
+		{
+			name:      "authorization code query",
+			input:     "https://127.0.0.1/callback?code=4/0AeanS0bXYZabcdefghijklmnop&state=abcdefghijklmnopqrstuvwxyz123456",
+			forbidden: "4/0AeanS0bXYZabcdefghijklmnop",
+		},
+		{
+			name:      "authorization code assignment",
+			input:     `code=4/0AeanS0bXYZabcdefghijklmnop`,
+			forbidden: "4/0AeanS0bXYZabcdefghijklmnop",
+		},
+		{
+			name:      "code verifier",
+			input:     "code_verifier=dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+			forbidden: "dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+		},
+		{
+			name:      "state json",
+			input:     `{"state":"abcdefghijklmnopqrstuvwxyz0123456789ABCD"}`,
+			forbidden: "abcdefghijklmnopqrstuvwxyz0123456789ABCD",
+		},
+		{
+			name:      "state assignment",
+			input:     "state=abcdefghijklmnopqrstuvwxyz0123456789ABCD",
+			forbidden: "abcdefghijklmnopqrstuvwxyz0123456789ABCD",
+		},
 	}
 
 	for _, tt := range tests {
@@ -152,6 +193,15 @@ func TestRedactDoesNotMaskProse(t *testing.T) {
 		"secret required",
 		"password required",
 		"key not found",
+		// P1-D: the ambiguous short OAuth fields must not eat ordinary prose.
+		"code=200 status",
+		"http code: 404",
+		"state=ready",
+		"state: failed",
+		"code review requested",
+		"state machine started",
+		// code_challenge is the PUBLIC PKCE value: deliberately NOT masked.
+		`code_challenge=dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk`,
 	}
 	for _, in := range tests {
 		if got := RedactString(in); got != in {

@@ -27,7 +27,35 @@ type redactionRule struct {
 // secretFieldNames is the alternation of key/field names whose VALUE is a
 // secret. It is shared by the query, JSON and assignment rules so a new field
 // name only has to be added once.
-const secretFieldNames = `api[_-]?key|key|access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?token|session|token|bearer|secret|client[_-]?secret|password|passwd|pwd|authorization|auth`
+// The alternation covers credential field names across the surfaces the core
+// touches, including the unambiguous OAuth flow names. `code_challenge` is
+// deliberately NOT listed: it is the PUBLIC half of PKCE (derived from the
+// verifier, safe to send to the browser), so masking it would hide useful
+// diagnostics while protecting nothing. `code_verifier`, its secret
+// counterpart, IS listed.
+//
+// `code` and `state` are the ambiguous short names: they are handled by a
+// dedicated guarded rule (oauth-short-field) rather than being added here,
+// because a bare `code=` also matches ordinary text like "code=200".
+const secretFieldNames = `api[_-]?key|key|access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?token|session|token|bearer|secret|client[_-]?secret|password|passwd|pwd|authorization|auth|device[_-]?code|user[_-]?code|code[_-]?verifier`
+
+// oauthShortFieldNames are the OAuth parameter names that are also common words.
+// They are only masked when the value passes oauthCodeGuard, so "code=200" and
+// "state=ready" survive while a real authorization code or CSRF state does not.
+const oauthShortFieldNames = `code|state`
+
+// minOAuthCodeLen is the shortest value treated as an OAuth code/state. Real
+// values are high-entropy base64url or hex of 20+ chars (a 128-bit state is ~22
+// base64url chars); requiring this length is what keeps the guarded rule from
+// eating ordinary prose.
+const minOAuthCodeLen = 20
+
+// oauthCodeGuard accepts a value as an OAuth code/state only when it is long
+// enough AND looks like a credential rather than a word. It reuses the same
+// entropy heuristic as the space-separated rule.
+func oauthCodeGuard(value string) bool {
+	return len(value) >= minOAuthCodeLen && looksLikeCredential(value)
+}
 
 // tokenChars is the set of characters that can appear inside a credential
 // (JWT/hex/base64url): dots, dashes, underscores, slashes, plus signs and
@@ -149,6 +177,24 @@ var redactionRules = []redactionRule{
 		guard: looksLikeCredential,
 	},
 	{
+		// Ambiguous OAuth short fields in any syntactic form: code=...,
+		// code: ..., "code":"...", ?code=..., "code": "...", code <value>.
+		// The guard is what separates a real authorization code from "code=200".
+		name: "oauth-short-field",
+		re: regexp.MustCompile(`(?i)"?(\b(?:` + oauthShortFieldNames + `)\b)"?\s*[:=]\s*"?` +
+			`(` + tokenChars + `{` + strconv.Itoa(minOAuthCodeLen) + `,})"?`),
+		repl:  "$1=" + Redacted,
+		guard: oauthCodeGuard,
+	},
+	{
+		// Space-separated ambiguous OAuth field: "code abcd...", "state abcd...".
+		name: "oauth-short-space",
+		re: regexp.MustCompile(`(?i)\b(` + oauthShortFieldNames + `)\s+(` +
+			tokenChars + `{` + strconv.Itoa(minOAuthCodeLen) + `,})\b`),
+		repl:  "$1 " + Redacted,
+		guard: oauthCodeGuard,
+	},
+	{
 		// OpenAI-style keys by prefix.
 		name: "openai-key",
 		re:   regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{8,}`),
@@ -183,20 +229,24 @@ func RedactString(s string) string {
 	return s
 }
 
-// applyRule substitutes one rule. A unguarded rule uses ReplaceAllString with
-// its template. A guarded rule (currently only space-separated-field) rebuilds
-// the match from its capture groups, so the guard can veto a match; such a rule
-// must use the "$1 <marker>" shape.
+// applyRule substitutes one rule. An unguarded rule uses ReplaceAllString with
+// its template. A guarded rule inspects each match and, when the guard accepts
+// the value, applies the same template to that match alone; when it rejects, the
+// match is left untouched. The guard receives the LAST capture group, which by
+// convention is the value in every guarded rule.
 func applyRule(s string, rule redactionRule) string {
 	if rule.guard == nil {
 		return rule.re.ReplaceAllString(s, rule.repl)
 	}
 	return rule.re.ReplaceAllStringFunc(s, func(match string) string {
 		sub := rule.re.FindStringSubmatch(match)
-		if len(sub) < 3 || !rule.guard(sub[2]) {
+		if len(sub) < 2 {
 			return match
 		}
-		return sub[1] + " " + Redacted
+		if !rule.guard(sub[len(sub)-1]) {
+			return match
+		}
+		return rule.re.ReplaceAllString(match, rule.repl)
 	})
 }
 

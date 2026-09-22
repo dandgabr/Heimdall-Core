@@ -60,14 +60,16 @@ test:
 vet:
 	$(GO) vet ./...
 
-# lint: staticcheck; a configuração vem de staticcheck.conf na raiz do módulo
+# lint: staticcheck; a configuração vem de staticcheck.conf na raiz do módulo.
+#
+# Roda via `go run <módulo>@<versão>` em vez de exigir o binário no PATH: assim o
+# alvo funciona numa máquina limpa (sem `go install` prévio) e continua pinado na
+# MESMA versão que o CI usa. O CI instala o binário e roda `staticcheck` direto,
+# então o gate remoto segue estrito — este alvo apenas deixa de ser um bloqueio
+# artificial no ambiente local. O download do módulo exige rede na primeira vez;
+# `GOFLAGS=-mod=mod` evita que um vendor/ ausente quebre a execução.
 lint:
-	@command -v staticcheck >/dev/null 2>&1 || { \
-		echo "staticcheck não está no PATH."; \
-		echo "instale com: go install honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION)"; \
-		exit 1; \
-	}
-	staticcheck ./...
+	$(GO) run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION) ./...
 
 # race: testes sob o detector de corrida
 race:

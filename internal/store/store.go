@@ -286,6 +286,29 @@ func (s *Store) SetMeta(key, value string) error {
 	return err
 }
 
+// SetMetaIfAbsent inserts key only if it does not already exist, reporting
+// whether THIS call performed the insert. It is the atomic primitive that
+// closes the load-or-create race: two concurrent boots both find no salt, both
+// generate one, and without an atomic insert the loser's derived KEK would be
+// based on a salt that was overwritten — leaving credentials permanently
+// undecryptable. With INSERT ... ON CONFLICT DO NOTHING, exactly one writer wins
+// and every caller then re-reads the winner.
+func (s *Store) SetMetaIfAbsent(key, value string) (inserted bool, err error) {
+	res, err := s.write.Exec(
+		`INSERT INTO meta (key, value) VALUES (?, ?)
+		 ON CONFLICT(key) DO NOTHING`,
+		key, value,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
 // HashManagementToken returns the hex SHA-256 of a presented token. Hashing is
 // the storage form: the database never holds the recoverable secret, so a stolen
 // database file yields no usable management credential.

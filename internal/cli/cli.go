@@ -26,20 +26,32 @@ import (
 var Version = "dev"
 
 // Execute runs the CLI with the given arguments and returns the process exit
-// code, writing diagnostics to os.Stderr.
+// code, writing command output to os.Stdout and diagnostics to os.Stderr.
 func Execute(args []string) int {
-	return executeTo(os.Stderr, args)
+	return executeWith(os.Stderr, os.Stdout, args)
 }
 
 // executeTo is Execute with an explicit error sink, so tests can assert the
 // rendered operator-facing message.
 func executeTo(stderr io.Writer, args []string) int {
+	return executeWith(stderr, io.Discard, args)
+}
+
+// executeToWithStdout is executeTo with a capturable stdout, used by tests that
+// assert command output.
+func executeToWithStdout(stdout io.Writer, args []string) int {
+	return executeWith(os.Stderr, stdout, args)
+}
+
+func executeWith(stderr, stdout io.Writer, args []string) int {
 	bundle, err := i18n.New()
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, i18n.RedactString(err.Error()))
 		return 1
 	}
 	root := newRootCmd()
+	root.SetOut(stdout)
+	root.SetErr(stderr)
 	root.SetArgs(args)
 	if err := root.Execute(); err != nil {
 		// Render the DomainError through the catalog: resolve the code in the
@@ -86,7 +98,7 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.AddCommand(newServeCmd(), newVersionCmd(), newTokenCmd())
+	root.AddCommand(newServeCmd(), newVersionCmd(), newTokenCmd(), newProviderCmd())
 	return root
 }
 
@@ -204,6 +216,126 @@ func newTokenRotateCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&configPath, "config", "", "path to the TOML configuration file")
 	return cmd
+}
+
+// newProviderCmd groups the read/management provider commands. None of them
+// performs network I/O: `list` and `status` only inspect the registry and the
+// descriptors, and `import` reads local files (read-only) into the vault.
+func newProviderCmd() *cobra.Command {
+	provider := &cobra.Command{
+		Use:   "provider",
+		Short: "Inspect and import provider credentials",
+	}
+	provider.AddCommand(newProviderListCmd(), newProviderStatusCmd(), newProviderImportCmd())
+	return provider
+}
+
+func newProviderListCmd() *cobra.Command {
+	var configPath string
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List registered providers, auth modes and pending endpoints",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			instance, err := buildReadOnly(configPath)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = instance.Close() }()
+
+			out := cmd.OutOrStdout()
+			for _, p := range instance.ProviderList() {
+				modes := strings.Join(p.AuthModes, ",")
+				pending := "ready"
+				if len(p.PendingEndpoints) > 0 {
+					pending = "pending: " + strings.Join(p.PendingEndpoints, ",")
+				}
+				if _, err := fmt.Fprintf(out, "%s\tprotocol=%s\tauth=%s\t%s\n",
+					p.ID, p.Protocol, modes, pending); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&configPath, "config", "", "path to the TOML configuration file")
+	return cmd
+}
+
+func newProviderStatusCmd() *cobra.Command {
+	var configPath string
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "Report whether each provider's auth flow can be built now",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			instance, err := buildReadOnly(configPath)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = instance.Close() }()
+
+			out := cmd.OutOrStdout()
+			for _, s := range instance.ProviderStatus() {
+				state := "ready"
+				if !s.Ready {
+					state = "blocked"
+					if s.ReasonCode != "" {
+						state = "blocked(" + s.ReasonCode + ")"
+					}
+				}
+				if _, err := fmt.Fprintf(out, "%s\t%s\n", s.ID, state); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&configPath, "config", "", "path to the TOML configuration file")
+	return cmd
+}
+
+func newProviderImportCmd() *cobra.Command {
+	var configPath string
+	cmd := &cobra.Command{
+		Use:   "import",
+		Short: "Import credentials from local harness files (read-only, sealed into the vault)",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			instance, err := buildReadOnly(configPath)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = instance.Close() }()
+
+			results, err := instance.ImportCredentials(cmd.Context())
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			if len(results) == 0 {
+				_, err := fmt.Fprintln(out, "no importable credentials found")
+				return err
+			}
+			for _, r := range results {
+				// Report the id and label only; never the value.
+				if _, err := fmt.Fprintf(out, "%s\tprovider=%s\tlabel=%s\n",
+					r.CredentialID, r.Provider, r.Label); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&configPath, "config", "", "path to the TOML configuration file")
+	return cmd
+}
+
+// buildReadOnly loads the config and builds the app for a management command
+// that does not start the listener.
+func buildReadOnly(configPath string) (*app.App, error) {
+	cfg, err := config.Load(config.Options{FilePath: configPath, Env: environ()})
+	if err != nil {
+		return nil, err
+	}
+	return app.Build(app.Options{Config: cfg, Env: environ()})
 }
 
 // environ snapshots the process environment. It is a separate function so
