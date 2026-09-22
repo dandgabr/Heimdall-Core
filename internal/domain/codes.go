@@ -78,6 +78,13 @@ const (
 	CodeProviderDuplicate  = "provider.duplicate"
 	CodeProviderInvalid    = "provider.invalid"
 	CodeProviderNoExecutor = "provider.executor_unavailable"
+	// CodeProviderLoginRequired is returned by `provider test` for an OAuth
+	// credential: the probe exercises a static API key, so an interactive grant
+	// must complete first. It is an explicit refusal, not a crash.
+	CodeProviderLoginRequired = "provider.login_required"
+	// CodeProviderNoCredential is returned when `provider test` finds no
+	// credential for the provider in the vault.
+	CodeProviderNoCredential = "provider.no_credential"
 
 	// translate.* — the pure translator layer (F2.3). A malformed payload or an
 	// unmappable shape fails with translate.failed; a lookup for a (from,to)

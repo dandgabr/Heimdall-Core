@@ -296,13 +296,25 @@ func TestProviderListCommand(t *testing.T) {
 		t.Fatalf("exit code = %d; output: %s", code, out.String())
 	}
 	text := out.String()
-	for _, want := range []string{"antigravity", "z.ai", "ollama-cloud", "command-code", "ready"} {
+	for _, want := range []string{"antigravity", "z.ai", "ollama-cloud", "command-code"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("provider list missing %q: %s", want, text)
 		}
 	}
 	if strings.Contains(text, "pending") {
 		t.Errorf("no provider should be pending after Wave 2: %s", text)
+	}
+	// Honest state: an empty vault means NO provider is ready. Antigravity is
+	// OAuth with no login -> blocked(provider.login_required); API-key providers have
+	// no credential -> blocked(provider.no_credential). Never a bare "ready".
+	if strings.Contains(text, "\tready") {
+		t.Errorf("provider list showed a ready provider with an empty vault: %s", text)
+	}
+	if !strings.Contains(text, "blocked(provider.login_required)") {
+		t.Errorf("antigravity should be blocked(provider.login_required): %s", text)
+	}
+	if !strings.Contains(text, "blocked(provider.no_credential)") {
+		t.Errorf("API-key providers should be blocked(provider.no_credential): %s", text)
 	}
 	// The Antigravity risk notice must appear; the API-key lines must not carry
 	// a risk marker.
@@ -330,8 +342,9 @@ func TestProviderListCommand(t *testing.T) {
 	}
 }
 
-// TestProviderStatusCommand reports readiness honestly. Wave 2: Antigravity is
-// now ready (endpoints confirmed) and shows its risk notice.
+// TestProviderStatusCommand is the P0-B CLI guard: with an EMPTY vault, status
+// must NOT report ready. Antigravity is blocked(provider.login_required) (no login
+// yet) and the API-key providers are blocked(provider.no_credential).
 func TestProviderStatusCommand(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "heimdall.toml")
@@ -347,14 +360,20 @@ func TestProviderStatusCommand(t *testing.T) {
 		t.Fatalf("exit code = %d; output: %s", code, out.String())
 	}
 	text := out.String()
-	if !strings.Contains(text, "antigravity\tready") {
-		t.Errorf("antigravity should be ready: %s", text)
+	if strings.Contains(text, "antigravity\tready") {
+		t.Errorf("antigravity must not be ready without login: %s", text)
+	}
+	if !strings.Contains(text, "antigravity\tblocked(provider.login_required)") {
+		t.Errorf("antigravity should be blocked(provider.login_required): %s", text)
 	}
 	if !strings.Contains(text, "!") {
 		t.Errorf("antigravity risk notice missing: %s", text)
 	}
-	if !strings.Contains(text, "z.ai\tready") {
-		t.Errorf("z.ai should be ready: %s", text)
+	if strings.Contains(text, "z.ai\tready") {
+		t.Errorf("z.ai must not be ready without a credential: %s", text)
+	}
+	if !strings.Contains(text, "z.ai\tblocked(provider.no_credential)") {
+		t.Errorf("z.ai should be blocked(provider.no_credential): %s", text)
 	}
 }
 

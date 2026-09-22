@@ -590,3 +590,77 @@ func realEgressDeps(secret string) contracts.ExecutorDeps {
 	}
 	return deps
 }
+
+// --- Probe ---
+
+// TestProbeHappyPath proves Probe issues GET {base}/models with the credential's
+// auth header and returns the upstream status.
+func TestProbeHappyPath(t *testing.T) {
+	var gotMethod, gotPath, gotAuth string
+	doer := doerFunc(func(r *http.Request) (*http.Response, error) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+	})
+	e := mustExecutor(t, Config{Family: "z.ai", BaseURL: "https://x/v1"}, testDeps(doer, "SECRET"))
+	status, err := e.Probe(context.Background(), apiKeyCred())
+	if err != nil || status != 200 {
+		t.Fatalf("Probe = %d, %v", status, err)
+	}
+	if gotMethod != http.MethodGet || gotPath != "/v1/models" {
+		t.Fatalf("request = %s %s, want GET /v1/models", gotMethod, gotPath)
+	}
+	if gotAuth != "Bearer SECRET" {
+		t.Fatalf("Authorization = %q", gotAuth)
+	}
+}
+
+// TestProbeAPIKeyHeader proves the header style is honoured.
+func TestProbeAPIKeyHeader(t *testing.T) {
+	var gotHeader string
+	doer := doerFunc(func(r *http.Request) (*http.Response, error) {
+		gotHeader = r.Header.Get("x-api-key")
+		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+	})
+	e := mustExecutor(t, Config{Family: "z.ai", BaseURL: "https://x/v1", AuthStyle: AuthAPIKeyHeader}, testDeps(doer, "SECRET"))
+	if _, err := e.Probe(context.Background(), apiKeyCred()); err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+	if gotHeader != "SECRET" {
+		t.Fatalf("x-api-key = %q", gotHeader)
+	}
+}
+
+// TestProbeErrorBranches covers credential, transport and upstream failures.
+func TestProbeErrorBranches(t *testing.T) {
+	// Credential missing.
+	e := mustExecutor(t, Config{Family: "z.ai", BaseURL: "https://x/v1"}, testDeps(doerFunc(func(*http.Request) (*http.Response, error) { return nil, nil }), ""))
+	if _, err := e.Probe(context.Background(), apiKeyCred()); !hasCode(err, domain.CodeAuthSecretMissing) {
+		t.Fatalf("credential err = %v", err)
+	}
+
+	// Transport failure.
+	e2 := mustExecutor(t, Config{Family: "z.ai", BaseURL: "https://x/v1"}, testDeps(doerFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("dial refused") }), "k"))
+	if _, err := e2.Probe(context.Background(), apiKeyCred()); !hasCode(err, domain.CodeUpstreamUnavailable) {
+		t.Fatalf("transport err = %v", err)
+	}
+
+	// Upstream 401 -> credential scope, non-retryable.
+	e3 := mustExecutor(t, Config{Family: "z.ai", BaseURL: "https://x/v1"}, testDeps(doerFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 401, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("no"))}, nil
+	}), "k"))
+	status, err := e3.Probe(context.Background(), apiKeyCred())
+	if status != 401 || !hasCode(err, domain.CodeUpstreamUnavailable) {
+		t.Fatalf("401 = %d, %v", status, err)
+	}
+	de := err.(*domain.DomainError)
+	if de.Retryable || de.Scope != domain.ScopeCredential {
+		t.Fatalf("401 scope/retryable = %+v", de)
+	}
+
+	// Bad base URL -> build error.
+	e4 := mustExecutor(t, Config{Family: "z.ai", BaseURL: "http://exa mple.test/v1"}, testDeps(doerFunc(func(*http.Request) (*http.Response, error) { return nil, nil }), "k"))
+	if _, err := e4.Probe(context.Background(), apiKeyCred()); err == nil {
+		t.Fatal("bad base url accepted")
+	}
+}

@@ -975,7 +975,7 @@ func (headerCaptureGate) Close() error                                          
 func TestProviderListAndStatus(t *testing.T) {
 	a := buildTestApp(t)
 
-	list := a.ProviderList()
+	list := a.ProviderList(context.Background())
 	if len(list) != 4 {
 		t.Fatalf("ProviderList = %d, want 4", len(list))
 	}
@@ -1021,12 +1021,18 @@ func TestProviderListAndStatus(t *testing.T) {
 		}
 	}
 
-	status := a.ProviderStatus()
+	// An empty vault: NO provider is ready. Antigravity is OAuth with no login,
+	// so it is blocked(provider.login_required); the API-key providers have no
+	// credential, so they are blocked(provider.no_credential).
+	status := a.ProviderStatus(context.Background())
 	var readyCount int
 	for _, s := range status {
 		if s.ID == "antigravity" {
-			if !s.Ready {
-				t.Errorf("antigravity should be ready now: %s", s.ReasonCode)
+			if s.Ready {
+				t.Error("antigravity reported ready without a credential")
+			}
+			if s.ReasonCode != domain.CodeProviderLoginRequired {
+				t.Errorf("antigravity reason = %q, want %s", s.ReasonCode, domain.CodeProviderLoginRequired)
 			}
 			if s.RiskNotice != "provider.risk_notice.antigravity" {
 				t.Errorf("antigravity status risk notice = %q", s.RiskNotice)
@@ -1035,8 +1041,20 @@ func TestProviderListAndStatus(t *testing.T) {
 			readyCount++
 		}
 	}
-	if readyCount != 3 {
-		t.Errorf("ready API-key providers = %d, want 3", readyCount)
+	if readyCount != 0 {
+		t.Errorf("ready providers = %d, want 0 (empty vault)", readyCount)
+	}
+	// Every API-key provider is blocked with provider.no_credential.
+	for _, s := range status {
+		if s.ID == "antigravity" {
+			continue
+		}
+		if s.Ready {
+			t.Errorf("%s reported ready with an empty vault", s.ID)
+		}
+		if s.ReasonCode != domain.CodeProviderNoCredential {
+			t.Errorf("%s reason = %q, want %s", s.ID, s.ReasonCode, domain.CodeProviderNoCredential)
+		}
 	}
 }
 
@@ -1548,7 +1566,7 @@ func TestProviderStatusNotReadyPath(t *testing.T) {
 		t.Fatalf("register ghost: %v", err)
 	}
 
-	status := a.ProviderStatus()
+	status := a.ProviderStatus(context.Background())
 	var sawBlocked bool
 	for _, s := range status {
 		if !s.Ready {

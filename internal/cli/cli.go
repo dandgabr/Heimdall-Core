@@ -245,7 +245,7 @@ func newProviderCmd() *cobra.Command {
 		Use:   "provider",
 		Short: "Inspect and import provider credentials",
 	}
-	provider.AddCommand(newProviderListCmd(), newProviderStatusCmd(), newProviderImportCmd())
+	provider.AddCommand(newProviderListCmd(), newProviderStatusCmd(), newProviderImportCmd(), newProviderTestCmd())
 	return provider
 }
 
@@ -261,7 +261,7 @@ func newProviderListCmd() *cobra.Command {
 			}
 			defer func() { _ = instance.Close() }()
 
-			return writeProviderList(cmd.OutOrStdout(), instance)
+			return writeProviderList(cmd.OutOrStdout(), instance, cmd.Context())
 		},
 	}
 	cmd.Flags().StringVar(&configPath, "config", "", "path to the TOML configuration file")
@@ -270,23 +270,24 @@ func newProviderListCmd() *cobra.Command {
 
 // writeProviderList renders `provider list`, including the per-provider ToS risk
 // notice (ADR-0003 §4) when the descriptor declares one.
-func writeProviderList(out io.Writer, instance *app.App) error {
-	return renderProviderList(out, instance.ProviderList(), instance.Bundle)
+func writeProviderList(out io.Writer, instance *app.App, ctx context.Context) error {
+	return renderProviderList(out, instance.ProviderList(ctx), instance.Bundle)
 }
 
 // renderProviderList is the pure renderer behind writeProviderList. It takes the
-// data directly so every branch (pending, risk notice, write failure) is
-// reachable in a test without constructing an App.
+// data directly so every branch (pending, not-ready, risk notice, write failure)
+// is reachable in a test without constructing an App.
+//
+// The `state` column is HONEST: "ready" only when the vault holds a usable
+// credential (summary.Ready). A pending provider shows its pending fields; any
+// other not-ready provider shows its i18n reason code, matching `provider status`.
 func renderProviderList(out io.Writer, list []app.ProviderSummary, bundle *i18n.Bundle) error {
 	lang := cliLanguage(bundle)
 	for _, p := range list {
 		modes := strings.Join(p.AuthModes, ",")
-		pending := "ready"
-		if len(p.PendingEndpoints) > 0 {
-			pending = "pending: " + strings.Join(p.PendingEndpoints, ",")
-		}
+		state := providerState(p.Ready, p.ReasonCode, p.PendingEndpoints)
 		if _, err := fmt.Fprintf(out, "%s\tprotocol=%s\tauth=%s\t%s\n",
-			p.ID, p.Protocol, modes, pending); err != nil {
+			p.ID, p.Protocol, modes, state); err != nil {
 			return err
 		}
 		if p.RiskNotice != "" {
@@ -296,6 +297,21 @@ func renderProviderList(out io.Writer, list []app.ProviderSummary, bundle *i18n.
 		}
 	}
 	return nil
+}
+
+// providerState renders the shared state label for a provider row. Both
+// `provider list` and `provider status` use it, so the two views cannot drift.
+func providerState(ready bool, reasonCode string, pending []string) string {
+	if len(pending) > 0 {
+		return "pending: " + strings.Join(pending, ",")
+	}
+	if ready {
+		return "ready"
+	}
+	if reasonCode != "" {
+		return "blocked(" + reasonCode + ")"
+	}
+	return "blocked"
 }
 
 func newProviderStatusCmd() *cobra.Command {
@@ -310,7 +326,7 @@ func newProviderStatusCmd() *cobra.Command {
 			}
 			defer func() { _ = instance.Close() }()
 
-			return writeProviderStatus(cmd.OutOrStdout(), instance)
+			return writeProviderStatus(cmd.OutOrStdout(), instance, cmd.Context())
 		},
 	}
 	cmd.Flags().StringVar(&configPath, "config", "", "path to the TOML configuration file")
@@ -318,21 +334,15 @@ func newProviderStatusCmd() *cobra.Command {
 }
 
 // writeProviderStatus renders `provider status`, including the risk notice.
-func writeProviderStatus(out io.Writer, instance *app.App) error {
-	return renderProviderStatus(out, instance.ProviderStatus(), instance.Bundle)
+func writeProviderStatus(out io.Writer, instance *app.App, ctx context.Context) error {
+	return renderProviderStatus(out, instance.ProviderStatus(ctx), instance.Bundle)
 }
 
 // renderProviderStatus is the pure renderer behind writeProviderStatus.
 func renderProviderStatus(out io.Writer, list []app.ProviderStatus, bundle *i18n.Bundle) error {
 	lang := cliLanguage(bundle)
 	for _, s := range list {
-		state := "ready"
-		if !s.Ready {
-			state = "blocked"
-			if s.ReasonCode != "" {
-				state = "blocked(" + s.ReasonCode + ")"
-			}
-		}
+		state := providerState(s.Ready, s.ReasonCode, nil)
 		if _, err := fmt.Fprintf(out, "%s\t%s\n", s.ID, state); err != nil {
 			return err
 		}
@@ -374,6 +384,35 @@ func newProviderImportCmd() *cobra.Command {
 				}
 			}
 			return nil
+		},
+	}
+	cmd.Flags().StringVar(&configPath, "config", "", "path to the TOML configuration file")
+	return cmd
+}
+
+func newProviderTestCmd() *cobra.Command {
+	var configPath string
+	cmd := &cobra.Command{
+		Use:   "test <provider-id>",
+		Short: "Probe an API-key provider end to end (builds the executor, calls GET /models)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			instance, err := buildReadOnly(configPath)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = instance.Close() }()
+
+			id := domain.ProviderID(args[0])
+			res, err := instance.ProviderTest(cmd.Context(), id)
+			if err != nil {
+				return err
+			}
+			// Report the provider, the credential id and the status only; never
+			// the key.
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s\tcredential=%s\tstatus=%d\n",
+				res.Provider, res.CredentialID, res.Status)
+			return err
 		},
 	}
 	cmd.Flags().StringVar(&configPath, "config", "", "path to the TOML configuration file")

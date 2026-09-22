@@ -199,19 +199,64 @@ func (e *Executor) buildRequest(ctx context.Context, req contracts.WireRequest, 
 			httpReq.Header.Add(name, v)
 		}
 	}
-	// Auth is set after the caller headers, so a caller cannot smuggle its own
-	// Authorization or override the credential.
-	if secret != "" {
-		httpReq.Header.Del("Authorization") // clear any caller-supplied value
-		httpReq.Header.Del("x-api-key")
-		switch e.cfg.AuthStyle {
-		case AuthAPIKeyHeader:
-			httpReq.Header.Set("x-api-key", secret)
-		default:
-			httpReq.Header.Set("Authorization", "Bearer "+secret)
-		}
-	}
+	applyAuth(httpReq, e.cfg.AuthStyle, secret)
 	return httpReq, nil
+}
+
+// applyAuth sets the credential's auth header LAST, after any caller headers, so
+// a caller cannot smuggle its own Authorization or override the credential. It
+// clears both shapes first so only the family's chosen header is present.
+func applyAuth(req *http.Request, style AuthHeaderStyle, secret string) {
+	if secret == "" {
+		return
+	}
+	req.Header.Del("Authorization")
+	req.Header.Del("x-api-key")
+	switch style {
+	case AuthAPIKeyHeader:
+		req.Header.Set("x-api-key", secret)
+	default:
+		req.Header.Set("Authorization", "Bearer "+secret)
+	}
+}
+
+// Probe performs a minimal authenticated request to prove the credential and the
+// upstream transport work end to end, WITHOUT a chat completion: it issues
+// `GET {base}/models` (the OpenAI-compatible listing endpoint) with the
+// credential's auth header. It returns the upstream HTTP status. A non-2xx is
+// mapped through the same ADR-0002 taxonomy as a chat call, so a 401 is
+// credential-scoped and non-retryable and a 5xx is provider-scoped and
+// retryable. It uses the executor's EgressPolicy-bound client, so TLS, the SSRF
+// denylist and redirect blocking all apply.
+func (e *Executor) Probe(ctx context.Context, cred contracts.Credential) (int, error) {
+	secret, err := e.openCredential(cred)
+	if err != nil {
+		return 0, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, e.endpoint("/models"), nil)
+	if err != nil {
+		return 0, domain.New(domain.CodeInvalidRequest,
+			domain.WithHTTPStatus(http.StatusBadRequest),
+			domain.WithScope(domain.ScopeRequest),
+			domain.WithCause(err),
+		)
+	}
+	httpReq.Header.Set("Accept", "application/json")
+	applyAuth(httpReq, e.cfg.AuthStyle, secret)
+
+	resp, err := e.doer.Do(httpReq)
+	if err != nil {
+		return 0, transportError(err)
+	}
+	defer resp.Body.Close()
+	// Drain a bounded amount so the connection can be reused; the body is never
+	// returned or logged.
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, MaxErrorBodyBytes))
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return resp.StatusCode, e.upstreamError(resp)
+	}
+	return resp.StatusCode, nil
 }
 
 // Do implements contracts.Executor: one non-streaming call, buffered.

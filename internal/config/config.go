@@ -13,17 +13,27 @@ package config
 
 import (
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/dandgabr/heimdall-core/internal/domain"
+	"github.com/dandgabr/heimdall-core/internal/egress"
 )
 
 // CurrentConfigVersion is the schema version this build understands. A file
 // declaring a higher version is rejected; a lower one is run through the
 // upgrader (upgrade.go).
+//
+// The `[[providers]]` block did NOT require a version bump: it is ADDITIVE
+// (an older file with no providers still loads, and a newer file's provider keys
+// are ignored by an older build through the forward-compatible `set` default),
+// and the resolver already ignores unknown keys. The upgrader therefore stays a
+// no-op at v1. A future REMOVAL or SEMANTIC change to an existing key would need
+// a bump and a migration in Upgrade.
 const CurrentConfigVersion = 1
 
 // LoopbackHost is the default and only permitted bind when allow_remote is off.
@@ -37,6 +47,38 @@ type Config struct {
 	Store         Store
 	Features      Features
 	Passthrough   Passthrough
+	// Providers is the per-provider upstream configuration (the `[[providers]]`
+	// block). It is file-driven; env can override individual fields via
+	// HEIMDALL_PROVIDERS_<n>_<FIELD>, following the same precedence rule. An
+	// empty list is valid: the built-in descriptors still register (listable),
+	// and a provider without a base_url simply cannot build an executor yet.
+	Providers []ProviderConfig
+}
+
+// ProviderConfig configures ONE provider's upstream transport (ADR-SEC-05).
+// It is deliberately data: the composition root turns it into an
+// OpenAICompatOptions, and the family's BuildExecutor refuses an empty BaseURL.
+type ProviderConfig struct {
+	// ID is the ProviderID this entry configures (e.g. "z.ai").
+	ID string
+	// BaseURL is the upstream root, e.g. https://api.z.ai/api/paas/v4. It is
+	// validated at load time: HTTPS unless it is an explicit loopback literal
+	// with AllowLoopback set (ADR-SEC-05 §2).
+	BaseURL string
+	// AuthHeader is "bearer" (Authorization: Bearer) or "x-api-key". Empty
+	// means bearer.
+	AuthHeader string
+	// AllowLoopback unlocks the loopback exception for a local runtime. It is
+	// only legal for an explicit loopback IP literal in BaseURL.
+	AllowLoopback bool
+	// TTFT bounds time-to-first-token. Zero uses the executor default.
+	TTFT time.Duration
+	// Idle bounds the gap between stream chunks. Zero disables the idle guard.
+	Idle time.Duration
+	// Enabled marks the provider as intended for use. An enabled provider MUST
+	// have a BaseURL (fail-closed at Validate): silently registering a family
+	// that can never execute would be a trap.
+	Enabled bool
 }
 
 // Server holds the HTTP listener settings.
@@ -225,7 +267,87 @@ func (c Config) Validate() error {
 			domain.WithParams(map[string]string{"reason": "store.path is empty"}),
 		)
 	}
+	if err := validateProviders(c.Providers); err != nil {
+		return err
+	}
 	return nil
+}
+
+// validAuthHeaders is the closed set of auth-header styles a provider entry may
+// declare. "" defaults to bearer.
+var validAuthHeaders = map[string]bool{"": true, "bearer": true, "x-api-key": true}
+
+// validateProviders enforces the ADR-SEC-05 shape of every `[[providers]]`
+// entry. It is fail-closed:
+//
+//   - an enabled provider MUST have a BaseURL;
+//   - a BaseURL MUST pass the same scheme/host policy the egress layer applies
+//     (HTTPS, or an explicit loopback literal only when AllowLoopback is set);
+//   - AllowLoopback MUST NOT be set for a non-loopback host (a decorative
+//     opt-in would silently widen the dial policy);
+//   - auth_header MUST be one of the known styles.
+//
+// A disabled provider with no base_url is allowed (it may be declared ahead of
+// its endpoint); it simply will not build an executor.
+func validateProviders(list []ProviderConfig) error {
+	for i, p := range list {
+		if strings.TrimSpace(p.ID) == "" {
+			return configProviderError("provider entry has an empty id", map[string]string{"index": strconv.Itoa(i)})
+		}
+		if !validAuthHeaders[p.AuthHeader] {
+			return configProviderError("invalid auth_header",
+				map[string]string{"id": p.ID, "value": p.AuthHeader})
+		}
+		if p.Enabled && strings.TrimSpace(p.BaseURL) == "" {
+			return configProviderError("enabled provider has no base_url",
+				map[string]string{"id": p.ID})
+		}
+		if strings.TrimSpace(p.BaseURL) == "" {
+			// A disabled provider may omit base_url; nothing else to check.
+			continue
+		}
+		loopbackLiteral, err := egress.ValidateUpstreamURL(p.BaseURL)
+		if err != nil {
+			return configProviderError("base_url rejected by the egress policy",
+				map[string]string{"id": p.ID})
+		}
+		// AllowLoopback is only ever meaningful for a loopback literal; setting
+		// it otherwise is a misconfiguration that would look like a live
+		// exception.
+		if p.AllowLoopback && !loopbackLiteral {
+			return configProviderError("allow_loopback requires a loopback literal base_url",
+				map[string]string{"id": p.ID})
+		}
+		// A cleartext (http) base_url is legal ONLY for an explicit loopback
+		// literal with the opt-in. ValidateUpstreamURL accepts the loopback http
+		// form because the POLICY decides the exception from the spec flag; the
+		// config layer must enforce the flag here, or a loopback http URL would
+		// slip through with AllowLoopback false (ADR-SEC-05 §2).
+		if isCleartextURL(p.BaseURL) && !(p.AllowLoopback && loopbackLiteral) {
+			return configProviderError("http base_url requires allow_loopback with a loopback literal",
+				map[string]string{"id": p.ID})
+		}
+	}
+	return nil
+}
+
+func configProviderError(reason string, params map[string]string) error {
+	params["reason"] = reason
+	return domain.New(domain.CodeConfigLoadFailed,
+		domain.WithHTTPStatus(500),
+		domain.WithParams(params),
+	)
+}
+
+// isCleartextURL reports whether raw is an http:// (not https://) URL. A parse
+// failure is treated as cleartext (fail-closed): ValidateUpstreamURL has already
+// rejected a malformed URL, so this only ever runs on a URL it accepted.
+func isCleartextURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return true
+	}
+	return !strings.EqualFold(u.Scheme, "https")
 }
 
 // defaultStorePath resolves the per-user data directory. Fallback to the

@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 
@@ -183,17 +184,61 @@ var envKeyMap = map[string]string{
 }
 
 // envLayer maps a supported HEIMDALL_* variable to its config key. Unknown
-// variables are ignored; adding a key means adding it to envKeyMap.
+// variables are ignored; adding a key means adding it to envKeyMap. A
+// per-provider variable (HEIMDALL_PROVIDERS_<i>_<FIELD>) is mapped by
+// parseProviderEnvVar, since its index is open-ended.
 func envLayer(env map[string]string) map[string]string {
 	out := map[string]string{}
 	for name, value := range env {
-		key, ok := envKeyMap[strings.ToUpper(name)]
-		if !ok {
+		upper := strings.ToUpper(name)
+		if key, ok := envKeyMap[upper]; ok {
+			out[key] = value
 			continue
 		}
-		out[key] = value
+		if key, ok := parseProviderEnvVar(upper); ok {
+			out[key] = value
+		}
 	}
 	return out
+}
+
+// providerEnvFields is the closed set of provider fields addressable via env.
+var providerEnvFields = map[string]string{
+	"ID":             "id",
+	"BASE_URL":       "base_url",
+	"AUTH_HEADER":    "auth_header",
+	"ALLOW_LOOPBACK": "allow_loopback",
+	"TTFT":           "ttft",
+	"IDLE":           "idle",
+	"ENABLED":        "enabled",
+}
+
+// parseProviderEnvVar recognises HEIMDALL_PROVIDERS_<index>_<FIELD> and returns
+// the dotted config key (providers.<index>.<field>). The field is matched
+// against the known set so a variable like HEIMDALL_PROVIDERS_0_TYPO is ignored
+// rather than silently setting nothing.
+func parseProviderEnvVar(name string) (string, bool) {
+	const prefix = "HEIMDALL_PROVIDERS_"
+	if !strings.HasPrefix(name, prefix) {
+		return "", false
+	}
+	rest := name[len(prefix):]
+	// Split at the FIRST underscore: the index is digits only, while a field
+	// name may itself contain underscores (BASE_URL, ALLOW_LOOPBACK, ...).
+	us := strings.IndexByte(rest, '_')
+	if us <= 0 || us == len(rest)-1 {
+		return "", false
+	}
+	indexStr, fieldStr := rest[:us], rest[us+1:]
+	field, ok := providerEnvFields[fieldStr]
+	if !ok {
+		return "", false
+	}
+	i, err := strconv.Atoi(indexStr)
+	if err != nil || i < 0 {
+		return "", false
+	}
+	return "providers." + strconv.Itoa(i) + "." + field, true
 }
 
 // set assigns one dotted config key. Unknown keys are ignored so a newer config
@@ -262,9 +307,85 @@ func set(cfg *Config, key, value string) error {
 	case "passthrough.api_key_env":
 		cfg.Passthrough.APIKeyEnv = value
 	default:
+		// A `[[providers]]` entry flattens to providers.<i>.<field>.
+		if idx, field, ok := parseProviderKey(key); ok {
+			return setProvider(cfg, idx, field, value)
+		}
 		// forward-compatible: ignore unknown keys
 	}
 	return nil
+}
+
+// parseProviderKey splits "providers.<i>.<field>" into its parts. It returns
+// ok=false for anything that is not a well-formed provider index key.
+func parseProviderKey(key string) (index int, field string, ok bool) {
+	const prefix = "providers."
+	if !strings.HasPrefix(key, prefix) {
+		return 0, "", false
+	}
+	rest := key[len(prefix):]
+	dot := strings.IndexByte(rest, '.')
+	if dot <= 0 || dot == len(rest)-1 {
+		return 0, "", false
+	}
+	i, err := strconv.Atoi(rest[:dot])
+	if err != nil || i < 0 {
+		return 0, "", false
+	}
+	return i, rest[dot+1:], true
+}
+
+// setProvider writes one field of the provider entry at index, growing the slice
+// as needed. An unknown field is ignored (forward-compatible).
+func setProvider(cfg *Config, index int, field, value string) error {
+	for len(cfg.Providers) <= index {
+		cfg.Providers = append(cfg.Providers, ProviderConfig{})
+	}
+	p := &cfg.Providers[index]
+	switch field {
+	case "id":
+		p.ID = value
+	case "base_url":
+		p.BaseURL = value
+	case "auth_header":
+		p.AuthHeader = value
+	case "allow_loopback":
+		b, err := parseBool(value)
+		if err != nil {
+			return badValue("providers."+strconv.Itoa(index)+".allow_loopback", value)
+		}
+		p.AllowLoopback = b
+	case "ttft":
+		d, err := parseDuration(value)
+		if err != nil {
+			return badValue("providers."+strconv.Itoa(index)+".ttft", value)
+		}
+		p.TTFT = d
+	case "idle":
+		d, err := parseDuration(value)
+		if err != nil {
+			return badValue("providers."+strconv.Itoa(index)+".idle", value)
+		}
+		p.Idle = d
+	case "enabled":
+		b, err := parseBool(value)
+		if err != nil {
+			return badValue("providers."+strconv.Itoa(index)+".enabled", value)
+		}
+		p.Enabled = b
+	default:
+		// forward-compatible: ignore unknown provider fields
+	}
+	return nil
+}
+
+// parseDuration parses a Go duration string ("30s", "2m"). An empty value means
+// "unset" (zero).
+func parseDuration(value string) (time.Duration, error) {
+	if strings.TrimSpace(value) == "" {
+		return 0, nil
+	}
+	return time.ParseDuration(value)
 }
 
 func badValue(key, value string) error {
@@ -297,6 +418,15 @@ func flatten(in map[string]any) map[string]string {
 			switch typed := v.(type) {
 			case map[string]any:
 				walk(key, typed)
+			case []map[string]any:
+				// An array of tables, e.g. [[providers]]. Flatten each element
+				// to a zero-based index segment so the resolver can address
+				// providers.0.id etc. without a second decoded representation.
+				// A scalar array falls through to the default branch below and
+				// is stringified there.
+				for i, elem := range typed {
+					walk(key+"."+strconv.Itoa(i), elem)
+				}
 			case string:
 				out[key] = typed
 			case bool:
