@@ -77,6 +77,24 @@ implementadores citam no código — são registradas aqui.
 > entendimento correlato em `notes/revisao-plano-arq-sec.md`. O risco de banimento ativo é
 > aceito explicitamente pelo dono do projeto.
 
+### Bloqueiam a F3
+
+| ADR | Título | Status | Data | Arquivo |
+| --- | --- | --- | --- | --- |
+| **0009** | Semântica das estratégias de roteamento | Aceita | 2026-09-22 | [`0009-estrategias-de-roteamento.md`](0009-estrategias-de-roteamento.md) |
+| **0010** | `Dispatcher`: tentativa, failover e accounting | Aceita | 2026-09-22 | [`0010-dispatcher.md`](0010-dispatcher.md) |
+| **0011** | Modelo de cota e `UsageRecorder` | Aceita | 2026-09-22 | [`0011-modelo-de-cota.md`](0011-modelo-de-cota.md) |
+| **0012** | `Breaker`: escopos, cooldown e half-open | Aceita | 2026-09-22 | [`0012-breaker.md`](0012-breaker.md) |
+| **0013** | Combos nomeados como DAG validado | Aceita | 2026-09-22 | [`0013-combos-como-dag.md`](0013-combos-como-dag.md) |
+
+> **ADR-0010/0011/0012 são o trio de execução da F3.** A ADR-0010 dá **dono** ao laço
+> de tentativas/failover/accounting (`Dispatcher`); a ADR-0011 congela o modelo de
+> **cota** por credencial/janela (`QuotaFilter` + `UsageRecorder`, preflight/observador,
+> não gate); a ADR-0012 congela a **máquina de estados do `Breaker`** (3 escopos,
+> cooldown, terminal, half-open). As três consomem a taxonomia tipada da ADR-0002 e o
+> `RoutePlan` da ADR-0009; a validação de F3 ("failover quando cota esgota; breaker não
+> cooldowna por erro de cliente") é o critério de aceite do conjunto.
+
 > As ADRs que bloqueiam fases estão registradas nesta pasta. A referência
 > normativa é o arquivo da ADR; as páginas correspondentes no ai-memory
 > continuam como contexto de planejamento.
@@ -90,6 +108,11 @@ implementadores citam no código — são registradas aqui.
 | SEC-01 | Custódia da chave mestra e cifra de credenciais | F1 | Aceita |
 | SEC-05 | [Política de egress e prevenção de SSRF](sec-05-politica-de-egress.md) | F2 | Aceita |
 | 0003 | [Ocultação por provedor OAuth](0003-obfuscacao-provider-oauth.md) | Conectores OAuth | Aceita |
+| 0009 | [Semântica das estratégias de roteamento](0009-estrategias-de-roteamento.md) | F3 | Aceita |
+| 0010 | [`Dispatcher`: tentativa, failover e accounting](0010-dispatcher.md) | F3 | Aceita |
+| 0011 | [Modelo de cota e `UsageRecorder`](0011-modelo-de-cota.md) | F3 | Aceita |
+| 0012 | [`Breaker`: escopos, cooldown e half-open](0012-breaker.md) | F3 | Aceita |
+| 0013 | [Combos nomeados como DAG validado](0013-combos-como-dag.md) | F3 | Aceita |
 
 ### Previstas (ainda não escritas)
 
@@ -105,11 +128,6 @@ Mantidas aqui para reservar o número e evitar colisão. Cada uma deve existir
 | 0006 | Protocolo de streaming/SSE canônico | F2 |
 | 0007 | Compatibilidade OpenAI (subset explícito) | F2 |
 | 0008 | Orçamentos de timeout e retry | F2 |
-| 0009 | Semântica das estratégias de roteamento | F3 |
-| 0010 | `Dispatcher`: tentativa, failover e accounting | F3 |
-| 0011 | Modelo de cota e `UsageRecorder` | F3 |
-| 0012 | `Breaker`: escopos, cooldown e half-open | F3 |
-| 0013 | Combos como DAG validado | F3 |
 | SEC-03 | Invariante de confiança de gates | F4 |
 | SEC-04 | Ordem e semântica do `GateChain` | F4 |
 | SEC-07 | Conteúdo, TTL e namespace da memória | F4 |
