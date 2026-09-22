@@ -123,13 +123,25 @@ func TestDescriptorsCoverFourProviders(t *testing.T) {
 		}
 	}
 
-	// Only Antigravity has pending endpoints; the API-key providers are complete.
+	// As of Wave 2 every endpoint is confirmed (ADR-0003): no provider is
+	// pending, so the composition root may enable all four against the live
+	// service.
 	pending := PendingEndpoints()
-	if _, ok := pending[ProviderAntigravity]; !ok {
-		t.Error("Antigravity must be flagged as having unconfirmed endpoints")
+	if len(pending) != 0 {
+		t.Errorf("PendingEndpoints must be empty after Wave 2, got %v", pending)
 	}
-	if _, ok := pending[ProviderZAI]; ok {
-		t.Error("z.ai must not be flagged: it needs no OAuth endpoints")
+
+	// Antigravity is the confirmed OAuth provider: it must declare the full
+	// CloudCode descriptor, client secret and obfuscation.
+	ag := descs[ProviderAntigravity]
+	if ag.Protocol != contracts.WireCloudCode {
+		t.Errorf("antigravity protocol = %q, want %q", ag.Protocol, contracts.WireCloudCode)
+	}
+	if !ag.RequiresClientSecret || ag.ClientSecret == "" || ag.ClientID == "" {
+		t.Errorf("antigravity client not configured: %+v", ag)
+	}
+	if !ag.IsObfuscated() || ag.RiskNotice == "" {
+		t.Errorf("antigravity must declare obfuscation + a risk notice: %+v", ag)
 	}
 }
 
@@ -148,24 +160,28 @@ func TestDescriptorLookup(t *testing.T) {
 	}
 }
 
-// TestFlowFactoryRefusesPendingAntigravity is the P0-C regression guard: while
-// the provider's endpoints are placeholders, Build must refuse with an explicit
-// code (auth.provider_pending_endpoints), never build a flow that can only fail
-// against the live service and never crash.
-func TestFlowFactoryRefusesPendingAntigravity(t *testing.T) {
+// TestFlowFactoryBuildsAntigravityFlow is the Wave-2 replacement for the old
+// "pending" guard: Antigravity's endpoints are confirmed, so Build must return
+// the confidential-client AntigravityFlow (not refuse).
+func TestFlowFactoryBuildsAntigravityFlow(t *testing.T) {
 	f := NewFlowFactory(testDeps())
 	flow, err := f.Build(ProviderAntigravity)
-	if err == nil {
-		t.Fatalf("Build(antigravity) succeeded while endpoints are pending: %v", flow)
+	if err != nil {
+		t.Fatalf("Build(antigravity): %v", err)
 	}
+	if _, ok := flow.(*oauth.AntigravityFlow); !ok {
+		t.Fatalf("Build(antigravity) = %T, want *oauth.AntigravityFlow", flow)
+	}
+}
+
+// TestFlowFactoryRefusalIsDataDriven proves the pending refusal still works when
+// a provider IS pending: a temporarily re-flagged descriptor fails closed.
+func TestFlowFactoryRefusalIsDataDriven(t *testing.T) {
+	f := NewFlowFactory(testDeps())
+	f.pending = map[domain.ProviderID][]string{ProviderZAI: {"TokenEndpoint"}}
+	f.modes[ProviderZAI] = []contracts.AuthMode{contracts.AuthOAuth}
+	_, err := f.Build(ProviderZAI)
 	assertCode(t, err, domain.CodeAuthProviderPending)
-	de := err.(*domain.DomainError)
-	if de.Params["provider"] != "antigravity" {
-		t.Errorf("error params missing provider: %+v", de.Params)
-	}
-	if de.Params["fields"] == "" {
-		t.Error("error params must name the pending fields")
-	}
 }
 
 // TestFlowFactoryBuildsOAuthWhenEndpointsConfirmed proves the refusal is data-

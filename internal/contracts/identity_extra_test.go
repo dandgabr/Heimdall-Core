@@ -139,3 +139,40 @@ func TestCredentialStringHidesSealed(t *testing.T) {
 		}
 	}
 }
+
+// TestProviderDescriptorIsObfuscated covers the predicate that decides whether
+// the obfuscation layer runs (ADR-0003 §1): the zero descriptor is not
+// obfuscated, and each technique independently makes it so.
+func TestProviderDescriptorIsObfuscated(t *testing.T) {
+	tests := []struct {
+		name string
+		desc ProviderDescriptor
+		want bool
+	}{
+		{"zero", ProviderDescriptor{}, false},
+		{"user agent", ProviderDescriptor{Obfuscation: Obfuscation{UserAgent: "ua"}}, true},
+		{"requires ua", ProviderDescriptor{Obfuscation: Obfuscation{RequiresUserAgent: true}}, true},
+		{"rewrites", ProviderDescriptor{Obfuscation: Obfuscation{PromptRewrites: []PromptRewrite{{From: "a"}}}}, true},
+		{"cloaking", ProviderDescriptor{Obfuscation: Obfuscation{ToolCloaking: &ToolCloaking{}}}, true},
+		{"project", ProviderDescriptor{Obfuscation: Obfuscation{SyntheticProject: true}}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.desc.IsObfuscated(); got != tt.want {
+				t.Errorf("IsObfuscated() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestWireCloudCode pins the CloudCode dialect value (ADR-0003 §2).
+func TestWireCloudCode(t *testing.T) {
+	if WireCloudCode != "cloudcode" {
+		t.Fatalf("WireCloudCode = %q", WireCloudCode)
+	}
+	// It must be usable as a Protocol value.
+	d := ProviderDescriptor{ID: "antigravity", Protocol: WireCloudCode}
+	if d.Protocol != WireCloudCode {
+		t.Fatalf("descriptor protocol = %q", d.Protocol)
+	}
+}

@@ -30,6 +30,10 @@ type FlowFactory struct {
 	// registry maps provider -> allowed auth modes, so a flow is only built for
 	// a mode the provider actually supports.
 	modes map[domain.ProviderID][]contracts.AuthMode
+	// pending is the set of providers with unconfirmed endpoints. It is a field
+	// (seeded from PendingEndpoints) so the refusal is testable without
+	// re-flagging a real descriptor.
+	pending map[domain.ProviderID][]string
 }
 
 // NewFlowFactory builds the factory over the F1 descriptors.
@@ -43,6 +47,7 @@ func NewFlowFactory(deps oauth.ClientDeps) *FlowFactory {
 			ProviderOllamaCloud: {contracts.AuthAPIKey},
 			ProviderCommandCode: {contracts.AuthAPIKey},
 		},
+		pending: PendingEndpoints(),
 	}
 }
 
@@ -61,7 +66,7 @@ func (f *FlowFactory) Build(provider domain.ProviderID) (contracts.AuthFlow, err
 			domain.WithParams(map[string]string{"provider": string(provider)}),
 		)
 	}
-	if fields := pendingFields(PendingEndpoints(), provider); len(fields) > 0 {
+	if fields := pendingFields(f.pending, provider); len(fields) > 0 {
 		return nil, domain.New(domain.CodeAuthProviderPending,
 			domain.WithHTTPStatus(501),
 			domain.WithParams(map[string]string{
@@ -88,9 +93,14 @@ func (f *FlowFactory) Build(provider domain.ProviderID) (contracts.AuthFlow, err
 
 	switch preferred {
 	case contracts.AuthOAuth:
-		// A device flow is preferred when a device endpoint exists; otherwise
-		// the PKCE flow (Antigravity currently declares both placeholders, and
-		// device is tried first).
+		// A provider whose descriptor declares a client secret gets the
+		// Antigravity-style flow: authorization_code WITH the public
+		// client_secret plus the post-exchange (project/tier discovery and
+		// onboarding). A device endpoint takes precedence when present,
+		// otherwise the generic PKCE flow.
+		if desc.RequiresClientSecret {
+			return oauth.NewAntigravityFlow(f.deps, desc, oauth.DefaultAntigravityConfig()), nil
+		}
 		if desc.DeviceAuthEndpoint != "" {
 			return oauth.NewDeviceCodeFlow(f.deps, desc), nil
 		}

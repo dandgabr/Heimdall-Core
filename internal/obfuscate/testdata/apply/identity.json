@@ -1,0 +1,41 @@
+{
+  "descriptor": {
+    "ID": "plain",
+    "Protocol": "",
+    "DisplayName": "",
+    "AuthEndpoint": "",
+    "TokenEndpoint": "",
+    "DeviceAuthEndpoint": "",
+    "DefaultScopes": null,
+    "RedirectAllowlist": null,
+    "ClientID": "",
+    "ClientSecret": "",
+    "RequiresClientSecret": false,
+    "Obfuscation": {
+      "UserAgent": "",
+      "RequiresUserAgent": false,
+      "PromptRewrites": null,
+      "ToolCloaking": null,
+      "SyntheticProject": false
+    },
+    "RiskNotice": ""
+  },
+  "input": {
+    "model": "m",
+    "messages": [
+      {
+        "role": "system",
+        "content": "opencode untouched"
+      }
+    ]
+  },
+  "expected": {
+    "model": "m",
+    "messages": [
+      {
+        "role": "system",
+        "content": "opencode untouched"
+      }
+    ]
+  }
+}

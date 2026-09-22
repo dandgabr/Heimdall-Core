@@ -33,22 +33,30 @@ func Descriptors() map[domain.ProviderID]contracts.ProviderDescriptor {
 	return map[domain.ProviderID]contracts.ProviderDescriptor{
 		ProviderAntigravity: {
 			ID:          ProviderAntigravity,
-			Protocol:    contracts.WireGemini,
+			Protocol:    contracts.WireCloudCode,
 			DisplayName: "Antigravity",
-			// TODO(confirm): endpoints to be confirmed with the Antigravity
-			// maintainers. Placeholders below follow the Google OAuth device
-			// flow shape (RFC 8628) and MUST NOT be used against production
-			// until verified.
-			DeviceAuthEndpoint: "https://oauth2.googleapis.com/device/code",
-			AuthEndpoint:       "https://accounts.google.com/o/oauth2/v2/auth",
-			TokenEndpoint:      "https://oauth2.googleapis.com/token",
-			DefaultScopes:      nil, // TODO(confirm): exact scopes unknown
+			// Endpoints and the public CLI client are confirmed against the
+			// reference connector (registry/antigravity.js) and the installed
+			// `agy` binary (ADR-0003 context).
+			AuthEndpoint:  "https://accounts.google.com/o/oauth2/v2/auth",
+			TokenEndpoint: "https://oauth2.googleapis.com/token",
+			DefaultScopes: []string{
+				"https://www.googleapis.com/auth/cloud-platform",
+				"https://www.googleapis.com/auth/userinfo.email",
+				"https://www.googleapis.com/auth/userinfo.profile",
+				"https://www.googleapis.com/auth/cclog",
+				"https://www.googleapis.com/auth/experimentsandconfigs",
+			},
 			// The loopback callback allowlist is the stable URI; the ephemeral
 			// port is validated by the bind.
 			RedirectAllowlist: []string{"http://127.0.0.1/callback"},
-			// TODO(confirm): ClientID is a public OAuth client id and is not
-			// known yet. Empty means Begin cannot run against the real service.
-			ClientID: "",
+			// The PUBLIC client id/secret embedded in the vendor CLI (ADR-0003):
+			// not user secrets, shipped in the binary by construction.
+			ClientID:             "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com",
+			ClientSecret:         "REDACTED_CLIENT_SECRET",
+			RequiresClientSecret: true,
+			Obfuscation:          antigravityObfuscation(),
+			RiskNotice:           "provider.risk_notice.antigravity",
 		},
 		ProviderZAI: {
 			ID:          ProviderZAI,
@@ -82,11 +90,53 @@ func Descriptor(id domain.ProviderID) (contracts.ProviderDescriptor, error) {
 
 // PendingEndpoints lists the provider IDs whose endpoints are placeholders
 // awaiting confirmation. The composition root must not enable these against the
-// live service until this list is empty for them.
+// live service until this list is empty for them. It is EMPTY as of Wave 2:
+// Antigravity's endpoints and public CLI client were confirmed (ADR-0003), so
+// no provider has an unconfirmed endpoint.
 func PendingEndpoints() map[domain.ProviderID][]string {
-	return map[domain.ProviderID][]string{
-		ProviderAntigravity: {
-			"DeviceAuthEndpoint", "AuthEndpoint", "TokenEndpoint", "DefaultScopes", "ClientID",
+	return map[domain.ProviderID][]string{}
+}
+
+// antigravityObfuscation is the per-provider harness-fingerprint layer for
+// Antigravity (ADR-0003 §1). It is DATA, so it is testable and versioned: the
+// executor applies it, the obfuscate package implements it, and a golden file
+// pins the effect of each technique.
+func antigravityObfuscation() contracts.Obfuscation {
+	return contracts.Obfuscation{
+		// The official IDE UA, pinned even off macOS (ADR-0003 §2).
+		UserAgent:         "antigravity/ide/2.11.0 darwin/arm64",
+		RequiresUserAgent: true,
+		PromptRewrites: []contracts.PromptRewrite{
+			// Competing-client branding that makes the backend flag the request
+			// with a fake 429 (ADR-0003 §2). The regex forms carry inline RE2
+			// flags (?i)/(?im) because Go has no /gim suffix.
+			{From: "You are a Claude agent, built on Anthropic's Claude Agent SDK.", To: ""},
+			{From: `(?im)^x-anthropic-billing-header:[^\n]*(?:\r?\n)*`, To: "", IsRegex: true},
+			{From: "opencode", To: "antigravity"},
 		},
+		ToolCloaking: &contracts.ToolCloaking{
+			NameSuffix: "_ide",
+			DecoyTools: antigravityDecoyTools(),
+		},
+		SyntheticProject: true,
 	}
+}
+
+// antigravityDecoyTools are the native IDE tool names injected as neutral
+// decoys; the description matches the reference connector's "currently
+// unavailable" text.
+func antigravityDecoyTools() []contracts.ToolDecoy {
+	names := []string{
+		"browser_subagent", "command_status", "find_by_name", "generate_image",
+		"grep_search", "list_dir", "list_resources", "mcp_sequential-thinking_sequentialthinking",
+		"multi_replace_file_content", "notify_user", "read_resource", "read_terminal",
+		"read_url_content", "replace_file_content", "run_command", "search_web",
+		"send_command_input", "task_boundary", "view_content_chunk", "view_file",
+		"write_to_file",
+	}
+	out := make([]contracts.ToolDecoy, 0, len(names))
+	for _, n := range names {
+		out = append(out, contracts.ToolDecoy{Name: n, Description: "This tool is currently unavailable."})
+	}
+	return out
 }

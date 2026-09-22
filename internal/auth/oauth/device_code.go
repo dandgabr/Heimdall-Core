@@ -38,6 +38,11 @@ type DeviceCodeFlow struct {
 	deviceAuthEndpoint string
 	tokenEndpoint      string
 	clientID           string
+	// clientSecret/requiresClientSecret mirror PKCEFlow: a confidential CLI
+	// client authenticates the token exchange and refresh with its public
+	// client secret (ADR-0003). Pure public clients leave both zero.
+	clientSecret         string
+	requiresClientSecret bool
 	// SlowDownIncrement overrides the 5s add on slow_down (tests use a tiny
 	// value; production keeps the RFC recommendation).
 	SlowDownIncrement time.Duration
@@ -56,10 +61,12 @@ func (f *DeviceCodeFlow) slowDownIncrement() time.Duration {
 // challenge) is self-contained.
 func NewDeviceCodeFlow(deps ClientDeps, desc contracts.ProviderDescriptor) *DeviceCodeFlow {
 	return &DeviceCodeFlow{
-		deps:               deps,
-		deviceAuthEndpoint: desc.DeviceAuthEndpoint,
-		tokenEndpoint:      desc.TokenEndpoint,
-		clientID:           desc.ClientID,
+		deps:                 deps,
+		deviceAuthEndpoint:   desc.DeviceAuthEndpoint,
+		tokenEndpoint:        desc.TokenEndpoint,
+		clientID:             desc.ClientID,
+		clientSecret:         desc.ClientSecret,
+		requiresClientSecret: desc.RequiresClientSecret,
 	}
 }
 
@@ -102,6 +109,10 @@ func (f *DeviceCodeFlow) Begin(ctx context.Context, desc contracts.ProviderDescr
 		form.Set("scope", strings.Join(desc.DefaultScopes, " "))
 	}
 
+	doer, err := f.deps.doerFor(endpoint)
+	if err != nil {
+		return contracts.AuthChallenge{}, err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint,
 		strings.NewReader(form.Encode()))
 	if err != nil {
@@ -110,7 +121,7 @@ func (f *DeviceCodeFlow) Begin(ctx context.Context, desc contracts.ProviderDescr
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := f.deps.httpClient().Do(req)
+	resp, err := doer.Do(req)
 	if err != nil {
 		return contracts.AuthChallenge{}, networkError(err)
 	}
@@ -272,6 +283,9 @@ func (f *DeviceCodeFlow) refresh(ctx context.Context, cred contracts.Credential,
 	form.Set("refresh_token", token.Token.Reveal())
 	if f.clientID != "" {
 		form.Set("client_id", f.clientID)
+	}
+	if f.requiresClientSecret && f.clientSecret != "" {
+		form.Set("client_secret", f.clientSecret)
 	}
 
 	tr, err := f.deps.postForm(ctx, f.tokenEndpoint, form)

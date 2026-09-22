@@ -204,13 +204,17 @@ func TestListRowsErrAfterValidRow(t *testing.T) {
 	}
 }
 
-// TestOpenPingError covers Open's Ping-failure branch by pointing at a DSN that
-// the injected fault driver rejects on connect.
+// TestCloseWritePoolError covers Close's write-pool error branch: the write
+// pool's connection fails on Close, so Close must RETURN that error (not
+// swallow it).
 func TestCloseWritePoolError(t *testing.T) {
-	// A store whose write pool's underlying conn fails on Close exercises the
-	// write-close error branch.
+	// A store whose write pool's underlying conn fails on Close. The write pool
+	// must have an open connection for Close to have something to report.
 	s := faultyStore(t, faultDriverConfig{failClose: true})
-	_ = s.Close() // must not panic; the branch runs
+	_ = s.write.Ping() // opens a conn so Close has one to close
+	if err := s.Close(); err == nil {
+		t.Fatal("Close swallowed the write-pool close error")
+	}
 }
 
 // TestMigrateFromLoadMigrationsError covers the loadMigrations error return

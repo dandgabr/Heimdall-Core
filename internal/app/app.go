@@ -23,6 +23,7 @@ import (
 	"github.com/dandgabr/heimdall-core/internal/config"
 	"github.com/dandgabr/heimdall-core/internal/contracts"
 	"github.com/dandgabr/heimdall-core/internal/domain"
+	"github.com/dandgabr/heimdall-core/internal/egress"
 	"github.com/dandgabr/heimdall-core/internal/gates"
 	"github.com/dandgabr/heimdall-core/internal/i18n"
 	"github.com/dandgabr/heimdall-core/internal/importers"
@@ -222,13 +223,24 @@ func (a *App) wireVault(opts Options) error {
 	}
 	a.Providers = registry
 
-	// The flow factory needs only HTTP deps; it is not key material. Injected
-	// deps (tests) win; production uses the real clock.
-	flowDeps := oauth.ClientDeps{Clock: systemClock{}}
+	// The flow factory needs the ADR-SEC-05 egress policy plus a clock; it holds
+	// no key material. EVERY OAuth call (token exchange, device polling,
+	// userinfo, loadCodeAssist, onboarding, refresh) builds its client from this
+	// policy, so TLS verification, the SSRF dial-time denylist and redirect
+	// blocking apply to OAuth exactly as to inference. A real OAuth endpoint is
+	// always HTTPS, so loopback stays disabled.
+	//
+	// Injected deps (tests) win; a test that supplies only HTTP leaves Egress
+	// nil, and the injected client is used. If neither is set the flow fails
+	// closed (it never falls back to http.DefaultClient).
+	flowDeps := oauth.ClientDeps{Egress: egress.New(), Clock: systemClock{}}
 	if opts.FlowDeps != nil {
 		flowDeps = *opts.FlowDeps
 		if flowDeps.Clock == nil {
 			flowDeps.Clock = systemClock{}
+		}
+		if flowDeps.Egress == nil && flowDeps.HTTP == nil {
+			flowDeps.Egress = egress.New()
 		}
 	}
 	a.Flows = auth.NewFlowFactory(flowDeps)
@@ -348,6 +360,12 @@ func (a *App) ProviderList() []ProviderSummary {
 			summary.Protocol = string(family.Protocol())
 		}
 		summary.PendingEndpoints = auth.PendingFields(id)
+		// The ToS risk notice (ADR-0003 §4) is descriptor data; expose it so the
+		// CLI/GUI can warn when an obfuscated provider is enabled. It is an i18n
+		// code, not prose.
+		if desc, err := auth.Descriptor(id); err == nil {
+			summary.RiskNotice = desc.RiskNotice
+		}
 		out = append(out, summary)
 	}
 	return out
@@ -368,6 +386,9 @@ func (a *App) ProviderStatus() []ProviderStatus {
 		} else {
 			status.Ready = true
 		}
+		if desc, err := auth.Descriptor(id); err == nil {
+			status.RiskNotice = desc.RiskNotice
+		}
 		out = append(out, status)
 	}
 	return out
@@ -379,6 +400,9 @@ type ProviderSummary struct {
 	Protocol         string
 	AuthModes        []string
 	PendingEndpoints []string
+	// RiskNotice is the i18n code of the ToS warning for an obfuscated provider
+	// (ADR-0003 §4); empty for a provider with no obfuscation.
+	RiskNotice string
 }
 
 // ProviderStatus is one row of `provider status`.
@@ -387,6 +411,8 @@ type ProviderStatus struct {
 	Ready      bool
 	Reason     string
 	ReasonCode string
+	// RiskNotice mirrors ProviderSummary.RiskNotice.
+	RiskNotice string
 }
 
 // wireGates builds the gate chain with the trivial logger gate. The sink keeps

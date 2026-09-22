@@ -75,6 +75,11 @@ const (
 	WireOpenAI    WireFormat = "openai"
 	WireAnthropic WireFormat = "anthropic"
 	WireGemini    WireFormat = "gemini"
+	// WireCloudCode is the Google Cloud Code Assist dialect spoken by the
+	// Antigravity connector: an envelope of {project, model, requestId, request}
+	// over v1internal:* methods. It is a PROTOCOL, distinct from the obfuscation
+	// layer (ADR-0003 §2): the envelope is independent of the fingerprint.
+	WireCloudCode WireFormat = "cloudcode"
 )
 
 // Modality is one kind of input or output content a model accepts or produces.
@@ -248,6 +253,12 @@ type AccountMeta struct {
 	DisplayName string
 	// Plan is the subscription tier a session belongs to, when known.
 	Plan string
+	// Project is the provider-side project/tenant id a session is bound to,
+	// when the provider requires one per request (e.g. the CloudCode
+	// `cloudaicompanionProject` discovered by the Antigravity OAuth
+	// post-exchange). Empty when the provider has no such concept. It is a
+	// non-secret routing value, not a credential.
+	Project string
 	// Scopes are the granted OAuth scopes.
 	Scopes []string
 }
@@ -287,8 +298,7 @@ func (c Credential) String() string {
 // flow can be built and tested without a live family implementation.
 //
 // ClientID is a PUBLIC identifier in the OAuth sense (PKCE and device_code are
-// public-client flows); there is no client secret in v1. If a confidential
-// client is ever added it must NOT be put here: it belongs in the SecretStore.
+// public-client flows). RequiresClientSecret is documented at its field below.
 type ProviderDescriptor struct {
 	ID       domain.ProviderID
 	Protocol WireFormat
@@ -310,9 +320,90 @@ type ProviderDescriptor struct {
 	RedirectAllowlist []string
 	// ClientID is the public OAuth client identifier.
 	ClientID string
-	// RequiresClientSecret is false for the public-client flows v1 targets.
-	// True is out of scope and must be refused rather than half-supported.
+	// ClientSecret is the PUBLIC client secret embedded in the provider's own
+	// CLI (e.g. the Antigravity/CloudCode CLI client). It is NOT the user's
+	// secret: it ships in the vendor's binary and is public by construction.
+	// ADR-0003 registers the decision that it lives HERE, in the descriptor,
+	// alongside ClientID, rather than in the SecretStore — putting public
+	// material in the vault would give it the protection of a user secret and
+	// obscure that it is not one.
+	ClientSecret string
+	// RequiresClientSecret selects the authorization_code flow WITH a client
+	// secret (the CLI client is not PKCE-only) rather than pure PKCE. It is
+	// true only for descriptors whose public client requires it (Antigravity);
+	// the flows the v1 shipped originally are false. See ADR-0003.
 	RequiresClientSecret bool
+	// Obfuscation is the per-provider harness-fingerprint layer (ADR-0003 §1).
+	// It is EMPTY for every provider that does not restrict its harness; a
+	// non-empty value is an explicit, versioned opt-in. It is applied by the
+	// family's executor, never globally.
+	Obfuscation Obfuscation
+	// RiskNotice is the i18n code of the ToS warning shown on the CLI and GUI
+	// when this provider is enabled (ADR-0003 §4). It is REQUIRED whenever
+	// Obfuscation is non-empty. It is an i18n code, not prose, like every other
+	// user-facing string.
+	RiskNotice string
+}
+
+// IsObfuscated reports whether the descriptor declares any obfuscation. It is the
+// single predicate the executor and the tests use, so "no obfuscation" is one
+// check rather than five field comparisons. Obfuscation contains a slice and is
+// therefore not comparable with ==, so the check is field-by-field.
+func (d ProviderDescriptor) IsObfuscated() bool {
+	o := d.Obfuscation
+	return o.UserAgent != "" ||
+		o.RequiresUserAgent ||
+		len(o.PromptRewrites) > 0 ||
+		o.ToolCloaking != nil ||
+		o.SyntheticProject
+}
+
+// Obfuscation is the per-provider harness-fingerprint layer (ADR-0003 §1). Every
+// field is OPTIONAL and independent; a zero Obfuscation is "no obfuscation", and
+// the obfuscate package applies each technique only when its field is set.
+type Obfuscation struct {
+	// UserAgent is the UA string to present. When empty, the executor sends its
+	// own.
+	UserAgent string
+	// RequiresUserAgent forces UserAgent to be sent even if some default UA
+	// exists, so an empty UserAgent is never silently substituted.
+	RequiresUserAgent bool
+	// PromptRewrites are applied to the system prompt, in order.
+	PromptRewrites []PromptRewrite
+	// ToolCloaking renames client tools and injects decoys; nil means no tool
+	// cloaking.
+	ToolCloaking *ToolCloaking
+	// SyntheticProject makes the executor generate a project id when the
+	// provider's discovery call returns none.
+	SyntheticProject bool
+}
+
+// PromptRewrite is one system-prompt substitution. IsRegex selects the matching
+// mode: false is a literal substring replace, true is a regular expression.
+// Keeping the mode explicit (rather than "looks like a regex") makes a golden
+// file unambiguous and avoids a pattern like "a.b" being silently treated as a
+// regex when the author meant the literal.
+type PromptRewrite struct {
+	From    string
+	To      string
+	IsRegex bool
+}
+
+// ToolCloaking renames the client's tools and injects decoy tools. NameSuffix is
+// appended to every client tool name; DecoyTools are appended verbatim. The
+// reverse map (suffixed -> original name) is returned by the obfuscate package
+// so responses can be uncloaked.
+type ToolCloaking struct {
+	NameSuffix string
+	DecoyTools []ToolDecoy
+}
+
+// ToolDecoy is one injected decoy tool: a name and a neutral description. The
+// decoys impersonate the provider's native tools; the description is deliberately
+// generic, matching the reference connector's "currently unavailable" text.
+type ToolDecoy struct {
+	Name        string
+	Description string
 }
 
 // ProviderFamily is the protocol implementation (ADR-0001): one per wire

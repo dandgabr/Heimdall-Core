@@ -1,0 +1,63 @@
+{
+  "descriptor": {
+    "ID": "plain",
+    "Protocol": "",
+    "DisplayName": "",
+    "AuthEndpoint": "",
+    "TokenEndpoint": "",
+    "DeviceAuthEndpoint": "",
+    "DefaultScopes": null,
+    "RedirectAllowlist": null,
+    "ClientID": "",
+    "ClientSecret": "",
+    "RequiresClientSecret": false,
+    "Obfuscation": {
+      "UserAgent": "",
+      "RequiresUserAgent": false,
+      "PromptRewrites": null,
+      "ToolCloaking": null,
+      "SyntheticProject": false
+    },
+    "RiskNotice": ""
+  },
+  "input": {
+    "model": "m",
+    "messages": [
+      {
+        "role": "user",
+        "content": "x"
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ]
+  },
+  "expected": {
+    "model": "m",
+    "messages": [
+      {
+        "role": "user",
+        "content": "x"
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ]
+  }
+}

@@ -35,18 +35,10 @@ func TestFlowFactoryAuthModes(t *testing.T) {
 }
 
 func TestPendingFields(t *testing.T) {
-	fields := PendingFields(ProviderAntigravity)
-	if len(fields) == 0 {
-		t.Fatal("antigravity must report pending fields")
-	}
-	found := false
-	for _, f := range fields {
-		if f == "ClientID" {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("ClientID not in pending fields: %v", fields)
+	// Wave 2: every endpoint is confirmed, so no provider reports pending
+	// fields and the factory enables all four.
+	if fields := PendingFields(ProviderAntigravity); len(fields) != 0 {
+		t.Errorf("antigravity pending fields = %v, want none", fields)
 	}
 	if got := PendingFields(ProviderZAI); len(got) != 0 {
 		t.Errorf("z.ai pending fields = %v, want none", got)

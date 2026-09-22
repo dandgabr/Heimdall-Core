@@ -278,7 +278,9 @@ func TestProviderImportNothingToImport(t *testing.T) {
 }
 
 // TestProviderListCommand is the P0-A CLI guard: `provider list` must run
-// without a key and report the providers plus the pending Antigravity fields.
+// without a key and report the four providers. Wave 2: Antigravity's endpoints
+// are confirmed (no "pending"), and its ToS risk notice must be shown, while the
+// API-key providers carry none.
 func TestProviderListCommand(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "heimdall.toml")
@@ -294,14 +296,42 @@ func TestProviderListCommand(t *testing.T) {
 		t.Fatalf("exit code = %d; output: %s", code, out.String())
 	}
 	text := out.String()
-	for _, want := range []string{"antigravity", "z.ai", "ollama-cloud", "command-code", "pending"} {
+	for _, want := range []string{"antigravity", "z.ai", "ollama-cloud", "command-code", "ready"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("provider list missing %q: %s", want, text)
 		}
 	}
+	if strings.Contains(text, "pending") {
+		t.Errorf("no provider should be pending after Wave 2: %s", text)
+	}
+	// The Antigravity risk notice must appear; the API-key lines must not carry
+	// a risk marker.
+	lines := strings.Split(text, "\n")
+	var agLine, zLine string
+	for i, l := range lines {
+		if strings.HasPrefix(l, "antigravity\t") {
+			agLine = l
+			if i+1 < len(lines) {
+				agLine += "\n" + lines[i+1]
+			}
+		}
+		if strings.HasPrefix(l, "z.ai\t") {
+			zLine = l
+			if i+1 < len(lines) {
+				zLine += "\n" + lines[i+1]
+			}
+		}
+	}
+	if !strings.Contains(agLine, "!") {
+		t.Errorf("antigravity risk notice missing:\n%s", agLine)
+	}
+	if strings.Contains(zLine, "!") {
+		t.Errorf("z.ai must not carry a risk notice:\n%s", zLine)
+	}
 }
 
-// TestProviderStatusCommand reports readiness honestly.
+// TestProviderStatusCommand reports readiness honestly. Wave 2: Antigravity is
+// now ready (endpoints confirmed) and shows its risk notice.
 func TestProviderStatusCommand(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "heimdall.toml")
@@ -317,8 +347,11 @@ func TestProviderStatusCommand(t *testing.T) {
 		t.Fatalf("exit code = %d; output: %s", code, out.String())
 	}
 	text := out.String()
-	if !strings.Contains(text, "antigravity\tblocked") {
-		t.Errorf("antigravity should be blocked: %s", text)
+	if !strings.Contains(text, "antigravity\tready") {
+		t.Errorf("antigravity should be ready: %s", text)
+	}
+	if !strings.Contains(text, "!") {
+		t.Errorf("antigravity risk notice missing: %s", text)
 	}
 	if !strings.Contains(text, "z.ai\tready") {
 		t.Errorf("z.ai should be ready: %s", text)
@@ -560,4 +593,86 @@ func TestExecuteWithBundleError(t *testing.T) {
 		t.Errorf("stderr = %q, want the bundle error", stderr.String())
 	}
 	newBundle = old
+}
+
+// failWriter always fails, to reach the render error branches.
+type cliFailWriter struct{}
+
+func (cliFailWriter) Write([]byte) (int, error) { return 0, os.ErrClosed }
+
+// TestRenderProviderListBranches drives the pure renderer: pending label, risk
+// notice, and a write failure.
+func TestRenderProviderListBranches(t *testing.T) {
+	bundle := i18n.MustNew()
+	list := []app.ProviderSummary{
+		{ID: "antigravity", Protocol: "cloudcode", AuthModes: []string{"oauth"}, RiskNotice: "provider.risk_notice.antigravity"},
+		{ID: "z.ai", Protocol: "openai", AuthModes: []string{"api_key"}, PendingEndpoints: []string{"TokenEndpoint"}},
+	}
+	var out strings.Builder
+	if err := renderProviderList(&out, list, bundle); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	text := out.String()
+	if !strings.Contains(text, "pending: TokenEndpoint") {
+		t.Errorf("pending label missing: %s", text)
+	}
+	if !strings.Contains(text, "!") {
+		t.Errorf("risk notice missing: %s", text)
+	}
+	if err := renderProviderList(cliFailWriter{}, list, bundle); err == nil {
+		t.Error("expected a write error")
+	}
+}
+
+// TestRenderProviderStatusBranches drives the pure status renderer: blocked with
+// and without a reason code, plus a write failure.
+func TestRenderProviderStatusBranches(t *testing.T) {
+	bundle := i18n.MustNew()
+	list := []app.ProviderStatus{
+		{ID: "a", Ready: true, RiskNotice: "provider.risk_notice.antigravity"},
+		{ID: "b", Ready: false, ReasonCode: "auth.provider_pending_endpoints"},
+		{ID: "c", Ready: false},
+	}
+	var out strings.Builder
+	if err := renderProviderStatus(&out, list, bundle); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	text := out.String()
+	if !strings.Contains(text, "b\tblocked(auth.provider_pending_endpoints)") {
+		t.Errorf("blocked(reason) missing: %s", text)
+	}
+	if !strings.Contains(text, "c\tblocked\n") {
+		t.Errorf("plain blocked missing: %s", text)
+	}
+	if err := renderProviderStatus(cliFailWriter{}, list, bundle); err == nil {
+		t.Error("expected a write error")
+	}
+}
+
+// cliNthFailWriter fails on the Nth Write call, so the risk-notice write error
+// branch is reachable (the first provider-line write succeeds).
+type cliNthFailWriter struct {
+	n     int
+	calls int
+}
+
+func (w *cliNthFailWriter) Write(b []byte) (int, error) {
+	w.calls++
+	if w.calls >= w.n {
+		return 0, os.ErrClosed
+	}
+	return len(b), nil
+}
+
+// TestRenderRiskNoticeWriteError covers the second write failure (the notice).
+func TestRenderRiskNoticeWriteError(t *testing.T) {
+	bundle := i18n.MustNew()
+	list := []app.ProviderSummary{{ID: "a", RiskNotice: "provider.risk_notice.antigravity"}}
+	if err := renderProviderList(&cliNthFailWriter{n: 2}, list, bundle); err == nil {
+		t.Error("expected the notice write error")
+	}
+	statuses := []app.ProviderStatus{{ID: "a", RiskNotice: "provider.risk_notice.antigravity"}}
+	if err := renderProviderStatus(&cliNthFailWriter{n: 2}, statuses, bundle); err == nil {
+		t.Error("expected the status notice write error")
+	}
 }

@@ -1,0 +1,95 @@
+{
+  "descriptor": {
+    "ID": "antigravity",
+    "Protocol": "",
+    "DisplayName": "",
+    "AuthEndpoint": "",
+    "TokenEndpoint": "",
+    "DeviceAuthEndpoint": "",
+    "DefaultScopes": null,
+    "RedirectAllowlist": null,
+    "ClientID": "",
+    "ClientSecret": "",
+    "RequiresClientSecret": false,
+    "Obfuscation": {
+      "UserAgent": "antigravity/ide/2.11.0 darwin/arm64",
+      "RequiresUserAgent": false,
+      "PromptRewrites": [
+        {
+          "From": "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+          "To": "",
+          "IsRegex": false
+        },
+        {
+          "From": "(?im)^x-anthropic-billing-header:[^\\n]*(?:\\r?\\n)*",
+          "To": "",
+          "IsRegex": true
+        },
+        {
+          "From": "opencode",
+          "To": "antigravity",
+          "IsRegex": false
+        }
+      ],
+      "ToolCloaking": {
+        "NameSuffix": "_ide",
+        "DecoyTools": [
+          {
+            "Name": "browser_subagent",
+            "Description": "This tool is currently unavailable."
+          },
+          {
+            "Name": "run_command",
+            "Description": "This tool is currently unavailable."
+          }
+        ]
+      },
+      "SyntheticProject": true
+    },
+    "RiskNotice": "provider.risk_notice.antigravity"
+  },
+  "input": {
+    "model": "m",
+    "messages": [
+      {
+        "role": "user",
+        "content": "x"
+      }
+    ]
+  },
+  "expected": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "x"
+      }
+    ],
+    "model": "m",
+    "tools": [
+      {
+        "function": {
+          "description": "This tool is currently unavailable.",
+          "name": "browser_subagent",
+          "parameters": {
+            "properties": {},
+            "required": [],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "This tool is currently unavailable.",
+          "name": "run_command",
+          "parameters": {
+            "properties": {},
+            "required": [],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  }
+}

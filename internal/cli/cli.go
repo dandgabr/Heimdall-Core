@@ -261,23 +261,41 @@ func newProviderListCmd() *cobra.Command {
 			}
 			defer func() { _ = instance.Close() }()
 
-			out := cmd.OutOrStdout()
-			for _, p := range instance.ProviderList() {
-				modes := strings.Join(p.AuthModes, ",")
-				pending := "ready"
-				if len(p.PendingEndpoints) > 0 {
-					pending = "pending: " + strings.Join(p.PendingEndpoints, ",")
-				}
-				if _, err := fmt.Fprintf(out, "%s\tprotocol=%s\tauth=%s\t%s\n",
-					p.ID, p.Protocol, modes, pending); err != nil {
-					return err
-				}
-			}
-			return nil
+			return writeProviderList(cmd.OutOrStdout(), instance)
 		},
 	}
 	cmd.Flags().StringVar(&configPath, "config", "", "path to the TOML configuration file")
 	return cmd
+}
+
+// writeProviderList renders `provider list`, including the per-provider ToS risk
+// notice (ADR-0003 §4) when the descriptor declares one.
+func writeProviderList(out io.Writer, instance *app.App) error {
+	return renderProviderList(out, instance.ProviderList(), instance.Bundle)
+}
+
+// renderProviderList is the pure renderer behind writeProviderList. It takes the
+// data directly so every branch (pending, risk notice, write failure) is
+// reachable in a test without constructing an App.
+func renderProviderList(out io.Writer, list []app.ProviderSummary, bundle *i18n.Bundle) error {
+	lang := cliLanguage(bundle)
+	for _, p := range list {
+		modes := strings.Join(p.AuthModes, ",")
+		pending := "ready"
+		if len(p.PendingEndpoints) > 0 {
+			pending = "pending: " + strings.Join(p.PendingEndpoints, ",")
+		}
+		if _, err := fmt.Fprintf(out, "%s\tprotocol=%s\tauth=%s\t%s\n",
+			p.ID, p.Protocol, modes, pending); err != nil {
+			return err
+		}
+		if p.RiskNotice != "" {
+			if _, err := fmt.Fprintf(out, "  ! %s\n", bundle.Format(lang, p.RiskNotice, nil)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func newProviderStatusCmd() *cobra.Command {
@@ -292,24 +310,39 @@ func newProviderStatusCmd() *cobra.Command {
 			}
 			defer func() { _ = instance.Close() }()
 
-			out := cmd.OutOrStdout()
-			for _, s := range instance.ProviderStatus() {
-				state := "ready"
-				if !s.Ready {
-					state = "blocked"
-					if s.ReasonCode != "" {
-						state = "blocked(" + s.ReasonCode + ")"
-					}
-				}
-				if _, err := fmt.Fprintf(out, "%s\t%s\n", s.ID, state); err != nil {
-					return err
-				}
-			}
-			return nil
+			return writeProviderStatus(cmd.OutOrStdout(), instance)
 		},
 	}
 	cmd.Flags().StringVar(&configPath, "config", "", "path to the TOML configuration file")
 	return cmd
+}
+
+// writeProviderStatus renders `provider status`, including the risk notice.
+func writeProviderStatus(out io.Writer, instance *app.App) error {
+	return renderProviderStatus(out, instance.ProviderStatus(), instance.Bundle)
+}
+
+// renderProviderStatus is the pure renderer behind writeProviderStatus.
+func renderProviderStatus(out io.Writer, list []app.ProviderStatus, bundle *i18n.Bundle) error {
+	lang := cliLanguage(bundle)
+	for _, s := range list {
+		state := "ready"
+		if !s.Ready {
+			state = "blocked"
+			if s.ReasonCode != "" {
+				state = "blocked(" + s.ReasonCode + ")"
+			}
+		}
+		if _, err := fmt.Fprintf(out, "%s\t%s\n", s.ID, state); err != nil {
+			return err
+		}
+		if s.RiskNotice != "" {
+			if _, err := fmt.Fprintf(out, "  ! %s\n", bundle.Format(lang, s.RiskNotice, nil)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func newProviderImportCmd() *cobra.Command {

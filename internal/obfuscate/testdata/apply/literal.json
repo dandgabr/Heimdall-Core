@@ -1,0 +1,60 @@
+{
+  "descriptor": {
+    "ID": "literal",
+    "Protocol": "",
+    "DisplayName": "",
+    "AuthEndpoint": "",
+    "TokenEndpoint": "",
+    "DeviceAuthEndpoint": "",
+    "DefaultScopes": null,
+    "RedirectAllowlist": null,
+    "ClientID": "",
+    "ClientSecret": "",
+    "RequiresClientSecret": false,
+    "Obfuscation": {
+      "UserAgent": "",
+      "RequiresUserAgent": false,
+      "PromptRewrites": [
+        {
+          "From": "OpenCode",
+          "To": "Antigravity",
+          "IsRegex": false
+        },
+        {
+          "From": "OPENCODE",
+          "To": "ANTIGRAVITY",
+          "IsRegex": false
+        }
+      ],
+      "ToolCloaking": null,
+      "SyntheticProject": false
+    },
+    "RiskNotice": ""
+  },
+  "input": {
+    "model": "m",
+    "messages": [
+      {
+        "role": "system",
+        "content": "Welcome to OpenCode and OPENCODE."
+      },
+      {
+        "role": "user",
+        "content": "hi"
+      }
+    ]
+  },
+  "expected": {
+    "messages": [
+      {
+        "content": "Welcome to Antigravity and ANTIGRAVITY.",
+        "role": "system"
+      },
+      {
+        "content": "hi",
+        "role": "user"
+      }
+    ],
+    "model": "m"
+  }
+}

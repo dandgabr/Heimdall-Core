@@ -1,0 +1,4 @@
+{
+  "seed": "a-very-long-seed-value-that-still-hashes-stably",
+  "expected_project": "useful-wave-f86cf"
+}

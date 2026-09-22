@@ -36,6 +36,14 @@ type PKCEFlow struct {
 	deps          ClientDeps
 	tokenEndpoint string
 	clientID      string
+	// clientSecret is the PUBLIC client secret of a confidential CLI client
+	// (ADR-0003). It is sent on the token exchange/refresh only when
+	// requiresClientSecret is set; a pure PKCE client leaves it empty.
+	clientSecret string
+	// requiresClientSecret selects the authorization_code flow WITH a client
+	// secret (and Google's access_type=offline&prompt=consent), rather than
+	// pure PKCE. It mirrors ProviderDescriptor.RequiresClientSecret.
+	requiresClientSecret bool
 	// allowlist is the exact redirect URIs permitted (host/scheme/path form,
 	// without a specific port).
 	allowlist []string
@@ -54,10 +62,12 @@ type PKCEFlow struct {
 // NewPKCEFlow builds the flow for one descriptor.
 func NewPKCEFlow(deps ClientDeps, desc contracts.ProviderDescriptor) *PKCEFlow {
 	return &PKCEFlow{
-		deps:          deps,
-		tokenEndpoint: desc.TokenEndpoint,
-		clientID:      desc.ClientID,
-		allowlist:     append([]string(nil), desc.RedirectAllowlist...),
+		deps:                 deps,
+		tokenEndpoint:        desc.TokenEndpoint,
+		clientID:             desc.ClientID,
+		clientSecret:         desc.ClientSecret,
+		requiresClientSecret: desc.RequiresClientSecret,
+		allowlist:            append([]string(nil), desc.RedirectAllowlist...),
 	}
 }
 
@@ -134,6 +144,14 @@ func (f *PKCEFlow) Begin(ctx context.Context, desc contracts.ProviderDescriptor)
 	q.Set("code_challenge_method", "S256")
 	if len(desc.DefaultScopes) > 0 {
 		q.Set("scope", strings.Join(desc.DefaultScopes, " "))
+	}
+	// A confidential CLI client (Antigravity/Google) needs a refresh token and
+	// an explicit consent prompt: access_type=offline is what returns the
+	// refresh_token, and prompt=consent forces Google to re-issue it. The
+	// descriptor's RequiresClientSecret selects this shape.
+	if f.requiresClientSecret {
+		q.Set("access_type", "offline")
+		q.Set("prompt", "consent")
 	}
 	authURL.RawQuery = q.Encode()
 
@@ -340,6 +358,11 @@ func (f *PKCEFlow) exchange(ctx context.Context, ch contracts.AuthChallenge, cod
 	if clientID != "" {
 		form.Set("client_id", clientID)
 	}
+	// A confidential client authenticates the exchange with its public client
+	// secret (ADR-0003); a pure PKCE client omits it.
+	if f.requiresClientSecret && f.clientSecret != "" {
+		form.Set("client_secret", f.clientSecret)
+	}
 
 	tr, err := f.deps.postForm(ctx, f.tokenEndpoint, form)
 	if err != nil {
@@ -369,7 +392,13 @@ func (f *PKCEFlow) Poll(context.Context, contracts.AuthChallenge) (contracts.Aut
 // Refresh exchanges a refresh token. Single-flight is the caller's lock; the
 // function is idempotent for the same input token.
 func (f *PKCEFlow) Refresh(ctx context.Context, cred contracts.Credential, token contracts.RefreshToken) (contracts.AuthResult, error) {
-	inner := &DeviceCodeFlow{deps: f.deps, tokenEndpoint: f.tokenEndpoint, clientID: f.clientID}
+	inner := &DeviceCodeFlow{
+		deps:                 f.deps,
+		tokenEndpoint:        f.tokenEndpoint,
+		clientID:             f.clientID,
+		clientSecret:         f.clientSecret,
+		requiresClientSecret: f.requiresClientSecret,
+	}
 	return inner.refresh(ctx, cred, token)
 }
 

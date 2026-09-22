@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,15 +17,20 @@ import (
 
 // --- deps helpers ---
 
-func TestHTTPClientAndNowDefaults(t *testing.T) {
-	var d ClientDeps
-	if d.httpClient() != http.DefaultClient {
-		t.Error("nil HTTP must fall back to http.DefaultClient")
+func TestDoerForAndNowDefaults(t *testing.T) {
+	// With neither HTTP nor Egress, doerFor must fail CLOSED — never
+	// http.DefaultClient (ADR-SEC-05 §4: DefaultClient follows redirects and
+	// would leak the Bearer token).
+	if _, err := (ClientDeps{}).doerFor("https://example.test/token"); err == nil {
+		t.Fatal("doerFor with no transport must fail closed")
+	} else {
+		assertCode(t, err, domain.CodeAuthFlowInsecure)
 	}
+
+	// A pre-built test client wins, unchanged.
 	custom := &http.Client{}
-	d = ClientDeps{HTTP: custom}
-	if d.httpClient() != custom {
-		t.Error("custom HTTP client not used")
+	if doer, err := (ClientDeps{HTTP: custom}).doerFor("https://example.test/token"); err != nil || doer != custom {
+		t.Fatalf("custom HTTP client not used: %v, %v", doer, err)
 	}
 
 	// now: Clock wins, then Now, then wall clock.
@@ -257,9 +263,11 @@ func TestDevicePollSlowDownCaps(t *testing.T) {
 	// Always slow_down, with a tiny increment so the loop spins quickly; the
 	// interval must be capped at maxSlowDownInterval, and ctx cancellation ends
 	// the loop rather than running forever.
-	var calls int
+	var calls int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
+		// Atomic: the handler runs on a server goroutine while the test reads
+		// this counter after cancellation (a plain int is a data race).
+		atomic.AddInt64(&calls, 1)
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte(`{"error":"slow_down"}`))
 	}))
@@ -278,7 +286,7 @@ func TestDevicePollSlowDownCaps(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected cancellation to end the poll loop")
 	}
-	if calls == 0 {
+	if atomic.LoadInt64(&calls) == 0 {
 		t.Error("token endpoint never called")
 	}
 }

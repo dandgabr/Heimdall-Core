@@ -1,0 +1,14 @@
+{
+  "unmap": {
+    "get_time_ide": "get_time",
+    "get_weather_ide": "get_weather"
+  },
+  "names": [
+    "get_weather_ide",
+    "get_time_ide"
+  ],
+  "expected_names": [
+    "get_weather",
+    "get_time"
+  ]
+}

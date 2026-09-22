@@ -993,8 +993,16 @@ func TestProviderListAndStatus(t *testing.T) {
 			antigravity = &list[i]
 		}
 	}
-	if antigravity == nil || len(antigravity.PendingEndpoints) == 0 {
-		t.Fatal("antigravity pending endpoints not reported")
+	// Wave 2: Antigravity's endpoints are confirmed, so it is no longer
+	// pending and it now carries the ToS risk notice (ADR-0003 §4).
+	if antigravity == nil {
+		t.Fatal("antigravity missing from the listing")
+	}
+	if len(antigravity.PendingEndpoints) != 0 {
+		t.Errorf("antigravity pending endpoints = %v, want none", antigravity.PendingEndpoints)
+	}
+	if antigravity.RiskNotice != "provider.risk_notice.antigravity" {
+		t.Errorf("antigravity risk notice = %q", antigravity.RiskNotice)
 	}
 	// Antigravity is OAuth, not API key: the listing must reflect the declared
 	// mode, not the family's default.
@@ -1006,6 +1014,10 @@ func TestProviderListAndStatus(t *testing.T) {
 			if len(p.AuthModes) != 1 || p.AuthModes[0] != "api_key" {
 				t.Errorf("z.ai auth modes = %v, want [api_key]", p.AuthModes)
 			}
+			// API-key providers carry NO risk notice.
+			if p.RiskNotice != "" {
+				t.Errorf("z.ai risk notice = %q, want empty", p.RiskNotice)
+			}
 		}
 	}
 
@@ -1013,11 +1025,11 @@ func TestProviderListAndStatus(t *testing.T) {
 	var readyCount int
 	for _, s := range status {
 		if s.ID == "antigravity" {
-			if s.Ready {
-				t.Error("antigravity reported ready while endpoints are pending")
+			if !s.Ready {
+				t.Errorf("antigravity should be ready now: %s", s.ReasonCode)
 			}
-			if s.ReasonCode != "auth.provider_pending_endpoints" {
-				t.Errorf("antigravity reason = %q", s.ReasonCode)
+			if s.RiskNotice != "provider.risk_notice.antigravity" {
+				t.Errorf("antigravity status risk notice = %q", s.RiskNotice)
 			}
 		} else if s.Ready {
 			readyCount++
@@ -1523,5 +1535,72 @@ func TestHandlerConcurrentRequestsNoRace(t *testing.T) {
 	records[0]["stage"] = "tampered"
 	if again := a.GateRecords(); again[0]["stage"] == "tampered" {
 		t.Fatal("GateRecords returned the internal slice, not a copy")
+	}
+}
+
+// TestProviderStatusNotReadyPath covers the blocked/reason branch: a provider
+// whose flow cannot be built is reported as not ready with its reason code.
+func TestProviderStatusNotReadyPath(t *testing.T) {
+	a := buildTestApp(t)
+	// Register a family whose descriptor is absent, so Flows.Build returns
+	// provider.not_found and the status is the blocked/reason branch.
+	if err := a.Providers.Register(ghostFamily{id: "ghost"}); err != nil {
+		t.Fatalf("register ghost: %v", err)
+	}
+
+	status := a.ProviderStatus()
+	var sawBlocked bool
+	for _, s := range status {
+		if !s.Ready {
+			sawBlocked = true
+			if s.ReasonCode == "" {
+				t.Errorf("blocked provider %s has no reason code", s.ID)
+			}
+		}
+	}
+	if !sawBlocked {
+		t.Fatal("expected at least one blocked provider")
+	}
+}
+
+// ghostFamily is a minimal ProviderFamily for a provider with no descriptor, so
+// ProviderStatus's Build fails with provider.not_found.
+type ghostFamily struct{ id domain.ProviderID }
+
+func (g ghostFamily) ID() domain.ProviderID { return g.id }
+func (g ghostFamily) AuthModes() []contracts.AuthMode {
+	return []contracts.AuthMode{contracts.AuthAPIKey}
+}
+func (g ghostFamily) Protocol() contracts.WireFormat { return contracts.WireOpenAI }
+func (g ghostFamily) Capabilities(domain.ModelID) (contracts.Capabilities, bool) {
+	return 0, false
+}
+func (g ghostFamily) BuildExecutor(contracts.Credential, contracts.ExecutorDeps) (contracts.Executor, error) {
+	return nil, errors.New("ghost")
+}
+
+// TestBuildInjectsEgressPolicyWhenFlowDepsEmpty covers the wiring branch: an
+// injected FlowDeps with neither Egress nor HTTP must receive the ADR-SEC-05
+// egress policy (never http.DefaultClient, and never a nil transport).
+func TestBuildInjectsEgressPolicyWhenFlowDepsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Store.Path = filepath.Join(dir, "heimdall.db")
+	cfg.Store.TokenPath = filepath.Join(dir, "management-token")
+
+	// Neither Egress nor HTTP: the empty deps must be filled with the policy.
+	deps := oauth.ClientDeps{}
+	instance, err := Build(Options{Config: cfg, Env: map[string]string{}, FlowDeps: &deps})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer func() { _ = instance.Close() }()
+
+	flow, err := instance.Flows.Build("antigravity")
+	if err != nil {
+		t.Fatalf("Build(antigravity): %v", err)
+	}
+	if flow == nil {
+		t.Fatal("nil flow")
 	}
 }

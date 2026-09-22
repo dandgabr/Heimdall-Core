@@ -67,6 +67,16 @@ implementadores citam no código — são registradas aqui.
 | --- | --- | --- | --- | --- |
 | **SEC-05** | Política de egress e prevenção de SSRF | Aceita | 2026-09-22 | [`sec-05-politica-de-egress.md`](sec-05-politica-de-egress.md) |
 
+### Conectores OAuth
+
+| ADR | Título | Status | Data | Arquivo |
+| --- | --- | --- | --- | --- |
+| **0003** | Ocultação (obfuscação) por provedor OAuth | Aceita | 2026-09-22 | [`0003-obfuscacao-provider-oauth.md`](0003-obfuscacao-provider-oauth.md) |
+
+> **ADR-0003 substitui** a cláusula *"sem cloaking/fingerprint"* da ADR-003 (ai-memory) e o
+> entendimento correlato em `notes/revisao-plano-arq-sec.md`. O risco de banimento ativo é
+> aceito explicitamente pelo dono do projeto.
+
 > As ADRs que bloqueiam fases estão registradas nesta pasta. A referência
 > normativa é o arquivo da ADR; as páginas correspondentes no ai-memory
 > continuam como contexto de planejamento.
@@ -79,6 +89,7 @@ implementadores citam no código — são registradas aqui.
 | 0002 | Taxonomia de erro | F1 | Aceita |
 | SEC-01 | Custódia da chave mestra e cifra de credenciais | F1 | Aceita |
 | SEC-05 | [Política de egress e prevenção de SSRF](sec-05-politica-de-egress.md) | F2 | Aceita |
+| 0003 | [Ocultação por provedor OAuth](0003-obfuscacao-provider-oauth.md) | Conectores OAuth | Aceita |
 
 ### Previstas (ainda não escritas)
 

@@ -62,5 +62,6 @@
   "startup.management_token_written": "A management token was generated and written to {path} (mode 0600).",
   "startup.shutdown": "Shutting down.",
   "api.mgmt.token_rotated": "Management token rotated and written to {path} (mode 0600); the previous token is now invalid.",
-  "api.mgmt.token_invalid": "Invalid management token."
+  "api.mgmt.token_invalid": "Invalid management token.",
+  "provider.risk_notice.antigravity": "Risk notice: Antigravity is used with a subscription session that the vendor may consider a harness violation. Proxying it can lead to account suspension or ban (ToS/ADR-0003)."
 }

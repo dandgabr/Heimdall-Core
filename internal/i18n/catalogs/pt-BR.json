@@ -62,5 +62,6 @@
   "startup.management_token_written": "Um token de gestão foi gerado e gravado em {path} (modo 0600).",
   "startup.shutdown": "Encerrando.",
   "api.mgmt.token_rotated": "Token de gestão rotacionado e gravado em {path} (modo 0600); o token anterior agora é inválido.",
-  "api.mgmt.token_invalid": "Token de gestão inválido."
+  "api.mgmt.token_invalid": "Token de gestão inválido.",
+  "provider.risk_notice.antigravity": "Aviso de risco: o Antigravity é usado com uma sessão de assinatura que o fornecedor pode considerar violação de harness. Usá-la como proxy pode causar suspensão ou banimento da conta (ToS/ADR-0003)."
 }
