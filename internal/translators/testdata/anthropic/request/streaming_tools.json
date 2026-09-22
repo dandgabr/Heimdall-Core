@@ -1,0 +1,71 @@
+{
+  "model": "claude-3-5-sonnet",
+  "stream": true,
+  "input": {
+    "model": "claude-3-5-sonnet",
+    "max_tokens": 128,
+    "stream": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": "weather in two cities?"
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "description": "Get weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ]
+          }
+        }
+      }
+    ],
+    "stream_options": {
+      "include_usage": true
+    }
+  },
+  "expected": {
+    "model": "claude-3-5-sonnet",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "weather in two cities?"
+          }
+        ]
+      }
+    ],
+    "max_tokens": 128,
+    "tools": [
+      {
+        "name": "get_weather",
+        "description": "Get weather",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "city": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "city"
+          ]
+        }
+      }
+    ],
+    "stream": true
+  }
+}

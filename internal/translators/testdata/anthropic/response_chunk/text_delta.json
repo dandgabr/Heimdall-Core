@@ -1,0 +1,25 @@
+{
+  "model": "claude-3-5-sonnet",
+  "stream": false,
+  "input": {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+      "type": "text_delta",
+      "text": "Hel"
+    }
+  },
+  "expected": {
+    "object": "chat.completion.chunk",
+    "created": 0,
+    "model": "claude-3-5-sonnet",
+    "choices": [
+      {
+        "index": 0,
+        "delta": {
+          "content": "Hel"
+        }
+      }
+    ]
+  }
+}

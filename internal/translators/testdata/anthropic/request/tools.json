@@ -1,0 +1,70 @@
+{
+  "model": "claude-3-5-sonnet",
+  "stream": false,
+  "input": {
+    "model": "claude-3-5-sonnet",
+    "max_tokens": 128,
+    "tool_choice": "required",
+    "messages": [
+      {
+        "role": "user",
+        "content": "weather?"
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "description": "Get weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "expected": {
+    "model": "claude-3-5-sonnet",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "weather?"
+          }
+        ]
+      }
+    ],
+    "max_tokens": 128,
+    "tools": [
+      {
+        "name": "get_weather",
+        "description": "Get weather",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "city": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "city"
+          ]
+        }
+      }
+    ],
+    "tool_choice": {
+      "type": "any"
+    }
+  }
+}

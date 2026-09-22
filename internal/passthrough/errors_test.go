@@ -191,7 +191,7 @@ func TestStreamRequestBuildError(t *testing.T) {
 // transport.
 func TestStreamTransportError(t *testing.T) {
 	c := mustClient(t, ClientConfig{BaseURL: "http://127.0.0.1:1/v1"})
-	c.http.Transport = failingRoundTripper{}
+	c.http = &http.Client{Transport: failingRoundTripper{}}
 	rec := httptest.NewRecorder()
 	if _, err := c.Stream(context.Background(), []byte("{}"), rec); err == nil {
 		t.Fatal("Stream succeeded with a failing transport")
@@ -201,7 +201,7 @@ func TestStreamTransportError(t *testing.T) {
 // TestCompleteTransportError covers Complete's Do-error branch.
 func TestCompleteTransportError(t *testing.T) {
 	c := mustClient(t, ClientConfig{BaseURL: "http://127.0.0.1:1/v1"})
-	c.http.Transport = failingRoundTripper{}
+	c.http = &http.Client{Transport: failingRoundTripper{}}
 	if _, err := c.Complete(context.Background(), []byte("{}")); err == nil {
 		t.Fatal("Complete succeeded with a failing transport")
 	}
@@ -468,7 +468,7 @@ func (rt bodyRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
 func TestStreamReaderTopOfLoopCancel(t *testing.T) {
 	body := &scriptedBody{chunks: 1_000_000, gate: make(chan struct{}), closed: make(chan struct{})}
 	client := mustClient(t, ClientConfig{BaseURL: "http://127.0.0.1:11434/v1"})
-	client.http.Transport = bodyRoundTripper{body: body}
+	client.http = &http.Client{Transport: bodyRoundTripper{body: body}}
 
 	// A writer that drains slowly so the reader is not permanently blocked.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -493,7 +493,7 @@ func TestStreamReaderTopOfLoopCancel(t *testing.T) {
 func TestStreamReaderErrorSendCancel(t *testing.T) {
 	body := &scriptedBody{chunks: streamBufferSize * 4, failAfter: true, gate: make(chan struct{}), closed: make(chan struct{})}
 	client := mustClient(t, ClientConfig{BaseURL: "http://127.0.0.1:11434/v1"})
-	client.http.Transport = bodyRoundTripper{body: body}
+	client.http = &http.Client{Transport: bodyRoundTripper{body: body}}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	w := &blockingWriter{release: make(chan struct{})}
@@ -538,7 +538,7 @@ func TestStreamReaderErrorSendCancelled(t *testing.T) {
 		closed:    make(chan struct{}),
 	}
 	client := mustClient(t, ClientConfig{BaseURL: "http://127.0.0.1:11434/v1"})
-	client.http.Transport = bodyRoundTripper{body: body}
+	client.http = &http.Client{Transport: bodyRoundTripper{body: body}}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	w := &blockingWriter{release: make(chan struct{})}
@@ -595,7 +595,7 @@ func TestStreamReaderTopOfLoopCheckDeterministic(t *testing.T) {
 	gate := make(chan struct{})
 	body := &gateBody{yield: 1, gate: gate}
 	client := mustClient(t, ClientConfig{BaseURL: "http://127.0.0.1:11434/v1"})
-	client.http.Transport = bodyRoundTripper{body: body}
+	client.http = &http.Client{Transport: bodyRoundTripper{body: body}}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	w := &discardWriter{}
@@ -674,7 +674,7 @@ func (w *parkedWriter) Write(p []byte) (int, error) {
 func TestStreamErrorSendCancelDeterministic(t *testing.T) {
 	body := &syncBody{remaining: streamBufferSize + 1, errRead: make(chan struct{})}
 	client := mustClient(t, ClientConfig{BaseURL: "http://127.0.0.1:11434/v1"})
-	client.http.Transport = bodyRoundTripper{body: body}
+	client.http = &http.Client{Transport: bodyRoundTripper{body: body}}
 
 	w := &parkedWriter{parked: make(chan struct{}), release: make(chan struct{})}
 	ctx, cancel := context.WithCancel(context.Background())

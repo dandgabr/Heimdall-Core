@@ -1,0 +1,33 @@
+{
+  "model": "claude-3-5-sonnet",
+  "stream": false,
+  "input": {
+    "type": "content_block_delta",
+    "index": 1,
+    "delta": {
+      "type": "input_json_delta",
+      "partial_json": "{\"days\":3}"
+    }
+  },
+  "expected": {
+    "object": "chat.completion.chunk",
+    "created": 0,
+    "model": "claude-3-5-sonnet",
+    "choices": [
+      {
+        "index": 0,
+        "delta": {
+          "tool_calls": [
+            {
+              "index": 1,
+              "type": "function",
+              "function": {
+                "arguments": "{\"days\":3}"
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

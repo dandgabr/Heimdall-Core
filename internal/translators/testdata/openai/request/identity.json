@@ -1,0 +1,30 @@
+{
+  "model": "gpt-4o",
+  "stream": true,
+  "input": {
+    "model": "gpt-4o",
+    "stream": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": "hi"
+      }
+    ],
+    "custom_provider_field": {
+      "keep": true
+    }
+  },
+  "expected": {
+    "model": "gpt-4o",
+    "stream": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": "hi"
+      }
+    ],
+    "custom_provider_field": {
+      "keep": true
+    }
+  }
+}

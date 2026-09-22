@@ -1,0 +1,33 @@
+{
+  "model": "claude-3-5-sonnet",
+  "stream": false,
+  "input": {
+    "id": "msg_3",
+    "type": "message",
+    "role": "assistant",
+    "model": "claude-3-5-sonnet",
+    "content": [
+      {
+        "type": "text",
+        "text": "trunc"
+      }
+    ],
+    "stop_reason": "max_tokens"
+  },
+  "expected": {
+    "id": "msg_3",
+    "object": "chat.completion",
+    "created": 0,
+    "model": "claude-3-5-sonnet",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "trunc"
+        },
+        "finish_reason": "length"
+      }
+    ]
+  }
+}

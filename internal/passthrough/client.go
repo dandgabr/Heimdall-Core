@@ -15,10 +15,13 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
+	"github.com/dandgabr/heimdall-core/internal/contracts"
 	"github.com/dandgabr/heimdall-core/internal/domain"
+	"github.com/dandgabr/heimdall-core/internal/egress"
 )
 
 // Request and response limits. A router in front of a provider must not let an
@@ -49,67 +52,58 @@ type ClientConfig struct {
 	MaxResponseBytes int64
 }
 
-// Client is the upstream HTTP client.
+// Client is the upstream HTTP client. Its transport is supplied by the single
+// egress policy (ADR-SEC-05); it is a plain contracts.HTTPDoer so a test can
+// inject a fake without a network.
 type Client struct {
 	baseURL     string
 	apiKey      string
 	maxResponse int64
-	http        *http.Client
+	http        contracts.HTTPDoer
 }
 
-// NewClient builds the upstream client, validating the destination first.
+// NewClient builds the upstream client through the single egress policy
+// (ADR-SEC-05). The passthrough does NOT build an http.Client itself: it passes
+// an EgressSpec to internal/egress, which applies TLS verification, the SSRF
+// dial-time denylist, redirect blocking and the per-phase timeouts.
 //
-// The http.Client deliberately has NO Timeout field set: a global Client.Timeout
-// would abort long-lived SSE streams mid-flight. The per-phase bounds live on
-// the Transport instead (ResponseHeaderTimeout here; idle and total deadlines
-// are layered on by the caller's context in later phases).
-//
-// Egress controls (ADR-003):
-//   - HTTPS is mandatory, except for an explicit loopback IP literal (a local
-//     model server); the policy is checked before the client exists;
-//   - a Dialer Control hook rejects loopback/private/link-local/metadata
-//     destinations after resolution, defeating DNS rebinding;
-//   - CheckRedirect refuses every redirect, so a 30x cannot move the request to
-//     an unvalidated destination.
+// The client deliberately has NO http.Client.Timeout: a global timeout would
+// abort long-lived SSE streams mid-flight. TTFT is bounded by the spec's
+// ResponseHeaderTimeout; the total deadline comes from the caller's context.
 func NewClient(cfg ClientConfig) (*Client, error) {
-	allowLoopback, err := validateUpstreamURL(cfg.BaseURL)
-	if err != nil {
-		return nil, err
-	}
 	maxResponse := cfg.MaxResponseBytes
 	if maxResponse <= 0 {
 		maxResponse = DefaultMaxResponseBytes
 	}
 
-	dialer := &net.Dialer{
-		Timeout:   10 * time.Second,
-		KeepAlive: 30 * time.Second,
-		Control:   ssrfControl(allowLoopback),
-	}
-	transport := &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
-		DialContext:           dialer.DialContext,
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   10,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
+	doer, err := egress.New().Client(contracts.EgressSpec{
+		BaseURL:               cfg.BaseURL,
+		AllowLoopback:         egress.IsLoopbackLiteral(hostOf(cfg.BaseURL)),
 		ResponseHeaderTimeout: cfg.ResponseHeaderTimeout,
+		MaxResponseBytes:      maxResponse,
+		FollowRedirects:       false,
+	})
+	if err != nil {
+		return nil, err
 	}
+
 	return &Client{
 		baseURL:     cfg.BaseURL,
 		apiKey:      cfg.APIKey,
 		maxResponse: maxResponse,
-		http: &http.Client{
-			Transport: transport,
-			// Never follow a redirect: an upstream 30x could otherwise send the
-			// request (and the Authorization header) to a different host.
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		},
+		http:        doer,
 	}, nil
+}
+
+// hostOf extracts the hostname from a raw URL. A parse failure yields "", which
+// IsLoopbackLiteral rejects, so a malformed URL never unlocks the loopback
+// exception.
+func hostOf(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
 }
 
 // endpoint returns the chat completions URL.

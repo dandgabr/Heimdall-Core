@@ -315,26 +315,6 @@ type ProviderDescriptor struct {
 	RequiresClientSecret bool
 }
 
-// Executor is a deliberate SEAM, not the frozen contract. The full
-// transport+auth contract (Do, CountTokens, Stream) lands in F2
-// (internal/contracts/executor.go). It is declared here with a single method so
-// ProviderFamily.BuildExecutor has a typed return today; F2 widens it. No
-// implementation exists in F1.1.
-type Executor interface {
-	// Family reports which family built this executor.
-	Family() domain.ProviderID
-}
-
-// ExecutorDeps is the support-service bundle BuildExecutor receives. It is
-// provisional: F2 extends it with the egress policy and the resolved secret
-// handle, which are not frozen yet. Only services already defined in this
-// package appear here, so nothing undefined is referenced.
-type ExecutorDeps struct {
-	Clock    Clock
-	IDs      IDGen
-	Redactor Redactor
-}
-
 // ProviderFamily is the protocol implementation (ADR-0001): one per wire
 // dialect, stateless with respect to accounts, and the extension point for new
 // providers. It builds a per-credential Executor but owns no credential state.
@@ -354,6 +334,7 @@ type ProviderFamily interface {
 	Capabilities(model domain.ModelID) (Capabilities, bool)
 	// BuildExecutor constructs the transport+auth for one credential. The
 	// credential's Sealed secret is opened by the returned Executor, never by
-	// the family, so plaintext does not outlive the executor.
+	// the family, so plaintext does not outlive the executor. The full Executor
+	// contract is frozen in executor.go (F2).
 	BuildExecutor(cred Credential, deps ExecutorDeps) (Executor, error)
 }

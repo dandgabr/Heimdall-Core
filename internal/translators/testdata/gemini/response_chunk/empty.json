@@ -1,0 +1,15 @@
+{
+  "model": "gemini-2.0-flash",
+  "stream": false,
+  "input": {
+    "candidates": [
+      {
+        "content": {
+          "role": "model",
+          "parts": []
+        }
+      }
+    ]
+  },
+  "expected": null
+}

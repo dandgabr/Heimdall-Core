@@ -1,0 +1,24 @@
+{
+  "model": "",
+  "stream": false,
+  "input": {
+    "type": "message_start",
+    "message": {
+      "id": "msg_1",
+      "model": "claude-3-5-sonnet"
+    }
+  },
+  "expected": {
+    "object": "chat.completion.chunk",
+    "created": 0,
+    "model": "claude-3-5-sonnet",
+    "choices": [
+      {
+        "index": 0,
+        "delta": {
+          "role": "assistant"
+        }
+      }
+    ]
+  }
+}

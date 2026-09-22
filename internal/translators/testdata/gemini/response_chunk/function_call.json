@@ -1,0 +1,45 @@
+{
+  "model": "gemini-2.0-flash",
+  "stream": false,
+  "input": {
+    "candidates": [
+      {
+        "content": {
+          "role": "model",
+          "parts": [
+            {
+              "functionCall": {
+                "name": "get_weather",
+                "args": {
+                  "city": "SP"
+                }
+              }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "expected": {
+    "object": "chat.completion.chunk",
+    "created": 0,
+    "model": "gemini-2.0-flash",
+    "choices": [
+      {
+        "index": 0,
+        "delta": {
+          "tool_calls": [
+            {
+              "index": 0,
+              "type": "function",
+              "function": {
+                "name": "get_weather",
+                "arguments": "{\"city\":\"SP\"}"
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

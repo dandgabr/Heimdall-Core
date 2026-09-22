@@ -1,0 +1,30 @@
+{
+  "model": "gemini-2.0-flash",
+  "stream": false,
+  "input": {
+    "candidates": [
+      {
+        "content": {
+          "role": "model",
+          "parts": []
+        },
+        "finishReason": "SAFETY"
+      }
+    ]
+  },
+  "expected": {
+    "id": "",
+    "object": "chat.completion",
+    "created": 0,
+    "model": "gemini-2.0-flash",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant"
+        },
+        "finish_reason": "content_filter"
+      }
+    ]
+  }
+}

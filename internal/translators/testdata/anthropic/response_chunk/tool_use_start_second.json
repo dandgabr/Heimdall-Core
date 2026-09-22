@@ -1,0 +1,35 @@
+{
+  "model": "claude-3-5-sonnet",
+  "stream": false,
+  "input": {
+    "type": "content_block_start",
+    "index": 1,
+    "content_block": {
+      "type": "tool_use",
+      "id": "toolu_2",
+      "name": "get_forecast"
+    }
+  },
+  "expected": {
+    "object": "chat.completion.chunk",
+    "created": 0,
+    "model": "claude-3-5-sonnet",
+    "choices": [
+      {
+        "index": 0,
+        "delta": {
+          "tool_calls": [
+            {
+              "index": 1,
+              "id": "toolu_2",
+              "type": "function",
+              "function": {
+                "name": "get_forecast"
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

@@ -61,9 +61,15 @@ implementadores citam no código — são registradas aqui.
 | **0002** | Taxonomia de erro (`DomainError`) | Aceita | 2026-09-22 | [`0002-taxonomia-de-erro.md`](0002-taxonomia-de-erro.md) |
 | **SEC-01** | Custódia da chave mestra e cifra de credenciais | Aceita | 2026-09-22 | [`sec-01-custodia-chave-cifra.md`](sec-01-custodia-chave-cifra.md) |
 
-> As três ADRs que bloqueiam a F1 (**0001**, **0002**, **SEC-01**) estão
-> registradas nesta pasta. A referência normativa é o arquivo da ADR; as páginas
-> correspondentes no ai-memory continuam como contexto de planejamento.
+### Bloqueiam a F2
+
+| ADR | Título | Status | Data | Arquivo |
+| --- | --- | --- | --- | --- |
+| **SEC-05** | Política de egress e prevenção de SSRF | Aceita | 2026-09-22 | [`sec-05-politica-de-egress.md`](sec-05-politica-de-egress.md) |
+
+> As ADRs que bloqueiam fases estão registradas nesta pasta. A referência
+> normativa é o arquivo da ADR; as páginas correspondentes no ai-memory
+> continuam como contexto de planejamento.
 
 ### Aceitas por fase
 
@@ -72,6 +78,7 @@ implementadores citam no código — são registradas aqui.
 | 0001 | Identidade: `ProviderFamily` × `Credential` | F1 | Aceita |
 | 0002 | Taxonomia de erro | F1 | Aceita |
 | SEC-01 | Custódia da chave mestra e cifra de credenciais | F1 | Aceita |
+| SEC-05 | [Política de egress e prevenção de SSRF](sec-05-politica-de-egress.md) | F2 | Aceita |
 
 ### Previstas (ainda não escritas)
 
@@ -83,7 +90,7 @@ Mantidas aqui para reservar o número e evitar colisão. Cada uma deve existir
 | 0003 | `config_version`, precedência e reload; segredos nunca por flag | F1 |
 | 0004 | Refresh single-flight (semântica do `CredentialStore.RefreshLock`) | F1 |
 | 0005 | Contrato i18n: convenção de `code`, params, fallback | F1 |
-| SEC-05 | Política de egress / SSRF | F2 |
+| SEC-05 | [Política de egress / SSRF](sec-05-politica-de-egress.md) (Aceita) | F2 |
 | 0006 | Protocolo de streaming/SSE canônico | F2 |
 | 0007 | Compatibilidade OpenAI (subset explícito) | F2 |
 | 0008 | Orçamentos de timeout e retry | F2 |

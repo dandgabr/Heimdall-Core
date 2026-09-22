@@ -1,0 +1,57 @@
+{
+  "model": "claude-3-5-sonnet",
+  "stream": false,
+  "input": {
+    "model": "claude-3-5-sonnet",
+    "max_tokens": 128,
+    "messages": [
+      {
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "id": "call_1",
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "arguments": "{\"city\":\"SP\"}"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "call_1",
+        "content": "{\"temp\":25}"
+      }
+    ]
+  },
+  "expected": {
+    "model": "claude-3-5-sonnet",
+    "messages": [
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "call_1",
+            "name": "get_weather",
+            "input": {
+              "city": "SP"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "call_1",
+            "content": "{\"temp\":25}"
+          }
+        ]
+      }
+    ],
+    "max_tokens": 128
+  }
+}

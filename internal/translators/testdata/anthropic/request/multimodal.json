@@ -1,0 +1,61 @@
+{
+  "model": "claude-3-5-sonnet",
+  "stream": false,
+  "input": {
+    "model": "claude-3-5-sonnet",
+    "max_tokens": 64,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "what is this"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,AAAB"
+            }
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "https://example.com/a.jpg"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "model": "claude-3-5-sonnet",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "what is this"
+          },
+          {
+            "type": "image",
+            "source": {
+              "type": "base64",
+              "media_type": "image/png",
+              "data": "AAAB"
+            }
+          },
+          {
+            "type": "image",
+            "source": {
+              "type": "url",
+              "url": "https://example.com/a.jpg"
+            }
+          }
+        ]
+      }
+    ],
+    "max_tokens": 64
+  }
+}

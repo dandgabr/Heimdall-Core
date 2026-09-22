@@ -1,7 +1,9 @@
 package providers
 
 import (
+	"net/http"
 	"testing"
+	"time"
 
 	"github.com/dandgabr/heimdall-core/internal/contracts"
 	"github.com/dandgabr/heimdall-core/internal/domain"
@@ -159,26 +161,69 @@ func TestOpenAICompatDefaults(t *testing.T) {
 	}
 }
 
-// TestBuildExecutorIsAStub proves the F1 placeholder satisfies the frozen seam
-// and rejects a credential from another family (a real guard, not a stub).
-func TestBuildExecutorIsAStub(t *testing.T) {
-	f, _ := NewOpenAICompat(OpenAICompatOptions{ID: "z.ai"})
+// TestBuildExecutorWiring pins the F2.2 BuildExecutor decisions: it refuses a
+// credential from another family and a family with no BaseURL, and it builds a
+// real executor (satisfying the full frozen contract) when wired correctly.
+func TestBuildExecutorWiring(t *testing.T) {
+	f, _ := NewOpenAICompat(OpenAICompatOptions{
+		ID:      "z.ai",
+		BaseURL: "https://api.example.com/v1",
+	})
+	deps := contracts.ExecutorDeps{
+		Clock: fakeClock{}, IDs: fakeIDs{}, Redactor: fakeRedactor{}, Egress: fakeEgress{},
+	}
 
 	exec, err := f.BuildExecutor(contracts.Credential{
-		ID:       "c1",
-		Provider: "z.ai",
-		AuthMode: contracts.AuthAPIKey,
-	}, contracts.ExecutorDeps{})
+		ID: "c1", Provider: "z.ai", AuthMode: contracts.AuthAPIKey,
+	}, deps)
 	if err != nil {
 		t.Fatalf("BuildExecutor: %v", err)
 	}
 	if exec.Family() != "z.ai" {
-		t.Errorf("stub executor family = %q", exec.Family())
+		t.Errorf("executor family = %q", exec.Family())
 	}
 
-	if _, err := f.BuildExecutor(contracts.Credential{Provider: "other"}, contracts.ExecutorDeps{}); err == nil {
+	// A credential from another family is refused.
+	if _, err := f.BuildExecutor(contracts.Credential{Provider: "other"}, deps); err == nil {
 		t.Error("executor built for a credential of another family")
 	}
+
+	// A family without a BaseURL cannot build an executor.
+	noURL, _ := NewOpenAICompat(OpenAICompatOptions{ID: "nourl"})
+	if _, err := noURL.BuildExecutor(contracts.Credential{Provider: "nourl", AuthMode: contracts.AuthAPIKey}, deps); !hasCode(err, domain.CodeProviderInvalid) {
+		t.Errorf("no-URL BuildExecutor err = %v, want %s", err, domain.CodeProviderInvalid)
+	}
+
+	// An auth mode the family does not declare is refused.
+	if _, err := f.BuildExecutor(contracts.Credential{Provider: "z.ai", AuthMode: contracts.AuthOAuth}, deps); !hasCode(err, domain.CodeCredentialInvalidAuthMode) {
+		t.Errorf("OAuth BuildExecutor err = %v, want %s", err, domain.CodeCredentialInvalidAuthMode)
+	}
+}
+
+type fakeClock struct{}
+
+func (fakeClock) Now() time.Time { return time.Now() }
+
+type fakeIDs struct{}
+
+func (fakeIDs) NewRequestID() domain.RequestID { return "r" }
+
+type fakeRedactor struct{}
+
+func (fakeRedactor) Redact(s string) string { return s }
+
+type fakeEgress struct{}
+
+func (fakeEgress) Client(contracts.EgressSpec) (contracts.HTTPDoer, error) { return fakeDoer{}, nil }
+
+type fakeDoer struct{}
+
+func (fakeDoer) Do(*http.Request) (*http.Response, error) { return nil, nil }
+
+// hasCode reports whether err is a DomainError with the given code.
+func hasCode(err error, code string) bool {
+	de, ok := err.(*domain.DomainError)
+	return ok && de.Code == code
 }
 
 func TestOpenAICompatModelsDeterministic(t *testing.T) {

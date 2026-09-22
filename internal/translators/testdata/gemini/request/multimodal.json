@@ -1,0 +1,46 @@
+{
+  "model": "gemini-2.0-flash",
+  "stream": false,
+  "input": {
+    "model": "gemini-2.0-flash",
+    "max_tokens": 32,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "describe"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/jpeg;base64,ZZZ"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "contents": [
+      {
+        "role": "user",
+        "parts": [
+          {
+            "text": "describe"
+          },
+          {
+            "inlineData": {
+              "mimeType": "image/jpeg",
+              "data": "ZZZ"
+            }
+          }
+        ]
+      }
+    ],
+    "generationConfig": {
+      "maxOutputTokens": 32
+    }
+  }
+}

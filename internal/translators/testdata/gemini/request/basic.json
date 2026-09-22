@@ -1,0 +1,60 @@
+{
+  "model": "gemini-2.0-flash",
+  "stream": false,
+  "input": {
+    "model": "gemini-2.0-flash",
+    "temperature": 0.5,
+    "max_tokens": 100,
+    "stop": [
+      "STOP"
+    ],
+    "messages": [
+      {
+        "role": "system",
+        "content": "be brief"
+      },
+      {
+        "role": "user",
+        "content": "hi"
+      },
+      {
+        "role": "assistant",
+        "content": "hello"
+      }
+    ]
+  },
+  "expected": {
+    "contents": [
+      {
+        "role": "user",
+        "parts": [
+          {
+            "text": "hi"
+          }
+        ]
+      },
+      {
+        "role": "model",
+        "parts": [
+          {
+            "text": "hello"
+          }
+        ]
+      }
+    ],
+    "systemInstruction": {
+      "parts": [
+        {
+          "text": "be brief"
+        }
+      ]
+    },
+    "generationConfig": {
+      "temperature": 0.5,
+      "maxOutputTokens": 100,
+      "stopSequences": [
+        "STOP"
+      ]
+    }
+  }
+}

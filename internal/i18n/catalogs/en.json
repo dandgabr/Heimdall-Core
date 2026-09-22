@@ -50,6 +50,8 @@
   "provider.duplicate": "Provider {provider} is already registered.",
   "provider.invalid": "Invalid provider registration: {reason}.",
   "provider.executor_unavailable": "The executor for provider {provider} is not implemented yet.",
+  "translate.failed": "Could not translate the payload: {reason}.",
+  "translate.unsupported": "There is no translator from {from} to {to}.",
   "import.failed": "Import failed: {reason}.",
   "import.source_missing": "No importable credential source was found at {path}.",
   "import.malformed": "The credential file at {path} is malformed: {reason}.",

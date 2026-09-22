@@ -1,0 +1,8 @@
+{
+  "model": "claude-3-5-sonnet",
+  "stream": false,
+  "input": {
+    "type": "ping"
+  },
+  "expected": null
+}

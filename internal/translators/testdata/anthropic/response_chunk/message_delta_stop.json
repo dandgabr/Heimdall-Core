@@ -1,0 +1,30 @@
+{
+  "model": "claude-3-5-sonnet",
+  "stream": false,
+  "input": {
+    "type": "message_delta",
+    "delta": {
+      "stop_reason": "end_turn"
+    },
+    "usage": {
+      "output_tokens": 15
+    }
+  },
+  "expected": {
+    "object": "chat.completion.chunk",
+    "created": 0,
+    "model": "claude-3-5-sonnet",
+    "choices": [
+      {
+        "index": 0,
+        "delta": {},
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 0,
+      "completion_tokens": 15,
+      "total_tokens": 15
+    }
+  }
+}

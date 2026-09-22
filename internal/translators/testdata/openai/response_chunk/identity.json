@@ -1,0 +1,36 @@
+{
+  "model": "gpt-4o",
+  "stream": false,
+  "input": {
+    "id": "chatcmpl-1",
+    "object": "chat.completion.chunk",
+    "created": 0,
+    "model": "gpt-4o",
+    "choices": [
+      {
+        "index": 0,
+        "delta": {
+          "content": "h"
+        },
+        "finish_reason": null
+      }
+    ],
+    "x_extra": "kept"
+  },
+  "expected": {
+    "id": "chatcmpl-1",
+    "object": "chat.completion.chunk",
+    "created": 0,
+    "model": "gpt-4o",
+    "choices": [
+      {
+        "index": 0,
+        "delta": {
+          "content": "h"
+        },
+        "finish_reason": null
+      }
+    ],
+    "x_extra": "kept"
+  }
+}

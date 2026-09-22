@@ -1,0 +1,46 @@
+{
+  "model": "gemini-2.0-flash",
+  "stream": false,
+  "input": {
+    "candidates": [
+      {
+        "content": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "Hi there"
+            }
+          ]
+        },
+        "finishReason": "STOP"
+      }
+    ],
+    "usageMetadata": {
+      "promptTokenCount": 4,
+      "candidatesTokenCount": 2,
+      "totalTokenCount": 6
+    },
+    "modelVersion": "gemini-2.0-flash"
+  },
+  "expected": {
+    "id": "",
+    "object": "chat.completion",
+    "created": 0,
+    "model": "gemini-2.0-flash",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Hi there"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 4,
+      "completion_tokens": 2,
+      "total_tokens": 6
+    }
+  }
+}

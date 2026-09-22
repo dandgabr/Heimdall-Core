@@ -3,9 +3,11 @@ package providers
 import (
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/dandgabr/heimdall-core/internal/contracts"
 	"github.com/dandgabr/heimdall-core/internal/domain"
+	"github.com/dandgabr/heimdall-core/internal/executors"
 )
 
 // OpenAICompat is the declarative OpenAI-compatible family.
@@ -22,6 +24,12 @@ type OpenAICompat struct {
 	desc     contracts.ProviderDescriptor
 	models   map[domain.ModelID]modelSpec
 	authMode []contracts.AuthMode
+
+	baseURL  string
+	allowLo  bool
+	authHead executors.AuthHeaderStyle
+	ttft     time.Duration
+	idle     time.Duration
 }
 
 // modelSpec is the declared capability/modality of one model.
@@ -42,6 +50,19 @@ type OpenAICompatOptions struct {
 	// reported as ok=false by Capabilities, which is what makes the Router skip
 	// a family it cannot reason about.
 	Models map[domain.ModelID]ModelCapabilities
+	// BaseURL is the upstream root the executor dials, e.g.
+	// https://api.example.com/v1. Empty means BuildExecutor refuses: an executor
+	// without a destination cannot run.
+	BaseURL string
+	// AllowLoopback unlocks the loopback exception for a local runtime. It is
+	// honoured only for an explicit loopback IP literal by the egress policy.
+	AllowLoopback bool
+	// AuthHeader selects the auth header shape; defaults to Bearer.
+	AuthHeader executors.AuthHeaderStyle
+	// ResponseHeaderTimeout bounds TTFT; zero uses the executor default.
+	ResponseHeaderTimeout time.Duration
+	// IdleTimeout bounds the gap between stream chunks.
+	IdleTimeout time.Duration
 }
 
 // ModelCapabilities is the declarative capability/modality pair for a model.
@@ -83,6 +104,11 @@ func NewOpenAICompat(opts OpenAICompatOptions) (*OpenAICompat, error) {
 		desc:     desc,
 		models:   models,
 		authMode: authModes,
+		baseURL:  opts.BaseURL,
+		allowLo:  opts.AllowLoopback,
+		authHead: opts.AuthHeader,
+		ttft:     opts.ResponseHeaderTimeout,
+		idle:     opts.IdleTimeout,
 	}, nil
 }
 
@@ -137,12 +163,10 @@ func (f *OpenAICompat) Models() []domain.ModelID {
 	return out
 }
 
-// BuildExecutor implements contracts.ProviderFamily.
-//
-// TODO(F2): the real Executor is the transport+auth contract that lands in F2.
-// F1.4 returns a documented stub so the registry can be exercised end to end
-// without inventing a contract that F2 will replace. The stub satisfies the
-// frozen seam (contracts.Executor) only.
+// BuildExecutor implements contracts.ProviderFamily. It builds the real F2.2
+// transport+auth executor for this family. It refuses a credential from another
+// family, and refuses when no BaseURL was configured (an executor without a
+// destination cannot run) or when the auth mode is unsupported.
 func (f *OpenAICompat) BuildExecutor(cred contracts.Credential, deps contracts.ExecutorDeps) (contracts.Executor, error) {
 	if cred.Provider != f.id {
 		return nil, domain.New(domain.CodeProviderInvalid,
@@ -152,14 +176,36 @@ func (f *OpenAICompat) BuildExecutor(cred contracts.Credential, deps contracts.E
 			}),
 		)
 	}
-	return stubExecutor{family: f.id}, nil
+	if f.baseURL == "" {
+		return nil, domain.New(domain.CodeProviderInvalid,
+			domain.WithHTTPStatus(500),
+			domain.WithParams(map[string]string{"reason": "family " + string(f.id) + " has no base url"}),
+		)
+	}
+	if !f.supportsAuthMode(cred.AuthMode) {
+		return nil, domain.New(domain.CodeCredentialInvalidAuthMode,
+			domain.WithHTTPStatus(500),
+			domain.WithScope(domain.ScopeCredential),
+			domain.WithParams(map[string]string{"provider": string(f.id), "mode": cred.AuthMode.String()}),
+		)
+	}
+
+	return executors.New(executors.Config{
+		Family:                f.id,
+		BaseURL:               f.baseURL,
+		AllowLoopback:         f.allowLo,
+		AuthStyle:             f.authHead,
+		ResponseHeaderTimeout: f.ttft,
+		IdleTimeout:           f.idle,
+	}, deps)
 }
 
-// stubExecutor is the F1 placeholder for the F2 Executor. It carries only the
-// family identity, which is all the frozen seam requires.
-type stubExecutor struct {
-	family domain.ProviderID
+// supportsAuthMode reports whether the family declares the credential's mode.
+func (f *OpenAICompat) supportsAuthMode(mode contracts.AuthMode) bool {
+	for _, m := range f.authMode {
+		if m == mode {
+			return true
+		}
+	}
+	return false
 }
-
-// Family implements contracts.Executor.
-func (e stubExecutor) Family() domain.ProviderID { return e.family }

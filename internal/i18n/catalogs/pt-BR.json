@@ -50,6 +50,8 @@
   "provider.duplicate": "O provedor {provider} já está registrado.",
   "provider.invalid": "Registro de provedor inválido: {reason}.",
   "provider.executor_unavailable": "O executor do provedor {provider} ainda não foi implementado.",
+  "translate.failed": "Não foi possível traduzir o payload: {reason}.",
+  "translate.unsupported": "Não há tradutor de {from} para {to}.",
   "import.failed": "Falha na importação: {reason}.",
   "import.source_missing": "Nenhuma fonte de credencial importável encontrada em {path}.",
   "import.malformed": "O arquivo de credenciais em {path} está malformado: {reason}.",

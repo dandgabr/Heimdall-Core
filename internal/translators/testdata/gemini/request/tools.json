@@ -1,0 +1,78 @@
+{
+  "model": "gemini-2.0-flash",
+  "stream": false,
+  "input": {
+    "model": "gemini-2.0-flash",
+    "max_tokens": 64,
+    "tool_choice": {
+      "type": "function",
+      "function": {
+        "name": "get_weather"
+      }
+    },
+    "messages": [
+      {
+        "role": "user",
+        "content": "weather?"
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "description": "Get weather",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  "expected": {
+    "contents": [
+      {
+        "role": "user",
+        "parts": [
+          {
+            "text": "weather?"
+          }
+        ]
+      }
+    ],
+    "generationConfig": {
+      "maxOutputTokens": 64
+    },
+    "tools": [
+      {
+        "functionDeclarations": [
+          {
+            "name": "get_weather",
+            "description": "Get weather",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "city": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "toolConfig": {
+      "functionCallingConfig": {
+        "mode": "ANY",
+        "allowedFunctionNames": [
+          "get_weather"
+        ]
+      }
+    }
+  }
+}

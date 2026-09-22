@@ -1,0 +1,60 @@
+{
+  "model": "claude-3-5-sonnet",
+  "stream": false,
+  "input": {
+    "id": "msg_2",
+    "type": "message",
+    "role": "assistant",
+    "model": "claude-3-5-sonnet",
+    "content": [
+      {
+        "type": "text",
+        "text": "Let me check"
+      },
+      {
+        "type": "tool_use",
+        "id": "toolu_1",
+        "name": "get_weather",
+        "input": {
+          "city": "SP"
+        }
+      }
+    ],
+    "stop_reason": "tool_use",
+    "usage": {
+      "input_tokens": 12,
+      "output_tokens": 8
+    }
+  },
+  "expected": {
+    "id": "msg_2",
+    "object": "chat.completion",
+    "created": 0,
+    "model": "claude-3-5-sonnet",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Let me check",
+          "tool_calls": [
+            {
+              "id": "toolu_1",
+              "type": "function",
+              "function": {
+                "name": "get_weather",
+                "arguments": "{\"city\":\"SP\"}"
+              }
+            }
+          ]
+        },
+        "finish_reason": "tool_calls"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 12,
+      "completion_tokens": 8,
+      "total_tokens": 20
+    }
+  }
+}

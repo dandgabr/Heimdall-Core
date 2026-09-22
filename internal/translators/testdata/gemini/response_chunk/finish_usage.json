@@ -1,0 +1,37 @@
+{
+  "model": "gemini-2.0-flash",
+  "stream": false,
+  "input": {
+    "candidates": [
+      {
+        "content": {
+          "role": "model",
+          "parts": []
+        },
+        "finishReason": "STOP"
+      }
+    ],
+    "usageMetadata": {
+      "promptTokenCount": 4,
+      "candidatesTokenCount": 2,
+      "totalTokenCount": 6
+    }
+  },
+  "expected": {
+    "object": "chat.completion.chunk",
+    "created": 0,
+    "model": "gemini-2.0-flash",
+    "choices": [
+      {
+        "index": 0,
+        "delta": {},
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 4,
+      "completion_tokens": 2,
+      "total_tokens": 6
+    }
+  }
+}

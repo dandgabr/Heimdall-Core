@@ -79,6 +79,12 @@ const (
 	CodeProviderInvalid    = "provider.invalid"
 	CodeProviderNoExecutor = "provider.executor_unavailable"
 
+	// translate.* — the pure translator layer (F2.3). A malformed payload or an
+	// unmappable shape fails with translate.failed; a lookup for a (from,to)
+	// pair with no registered translator fails with translate.unsupported.
+	CodeTranslateFailed      = "translate.failed"
+	CodeTranslateUnsupported = "translate.unsupported"
+
 	// import.* — read-only harness credential import (F1.6).
 	CodeImportFailed        = "import.failed"
 	CodeImportSourceMissing = "import.source_missing"

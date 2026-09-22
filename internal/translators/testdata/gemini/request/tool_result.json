@@ -1,0 +1,33 @@
+{
+  "model": "gemini-2.0-flash",
+  "stream": false,
+  "input": {
+    "model": "gemini-2.0-flash",
+    "max_tokens": 32,
+    "messages": [
+      {
+        "role": "tool",
+        "tool_call_id": "get_weather",
+        "content": "{\"temp\":25}"
+      }
+    ]
+  },
+  "expected": {
+    "contents": [
+      {
+        "role": "user",
+        "parts": [
+          {
+            "functionResponse": {
+              "name": "get_weather",
+              "response": "{\"temp\":25}"
+            }
+          }
+        ]
+      }
+    ],
+    "generationConfig": {
+      "maxOutputTokens": 32
+    }
+  }
+}

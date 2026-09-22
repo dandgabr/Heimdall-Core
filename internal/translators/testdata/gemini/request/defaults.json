@@ -1,0 +1,25 @@
+{
+  "model": "gemini-2.0-flash",
+  "stream": false,
+  "input": {
+    "model": "gemini-2.0-flash",
+    "messages": [
+      {
+        "role": "user",
+        "content": "hi"
+      }
+    ]
+  },
+  "expected": {
+    "contents": [
+      {
+        "role": "user",
+        "parts": [
+          {
+            "text": "hi"
+          }
+        ]
+      }
+    ]
+  }
+}
