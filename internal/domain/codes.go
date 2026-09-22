@@ -85,6 +85,25 @@ const (
 	// CodeProviderNoCredential is returned when `provider test` finds no
 	// credential for the provider in the vault.
 	CodeProviderNoCredential = "provider.no_credential"
+	// CodeProviderFuture labels a PLANNED provider whose integration is not
+	// shipped yet. It is distinct from a user-fixable block: the provider is
+	// listed but not usable in this build.
+	CodeProviderFuture = "provider.future"
+	// CodeProviderAPIKeyNotSupported is returned when an API key is added to a
+	// provider that does not accept AuthAPIKey (e.g. an OAuth provider). It is
+	// about the PROVIDER's supported modes, distinct from
+	// credential.invalid_auth_mode (a stored credential with an unknown mode).
+	CodeProviderAPIKeyNotSupported = "provider.api_key_not_supported"
+	// CodeProviderAuthModeUnsupported is returned when a credential's mode is
+	// not one the provider supports (e.g. an OAuth credential on an API-key-only
+	// family). It names the provider and the offending mode.
+	CodeProviderAuthModeUnsupported = "provider.auth_mode_unsupported"
+	// CodeProviderRerouteUnsupported is returned when a gate requests a reroute
+	// but the dispatcher that validates the target does not exist yet.
+	CodeProviderRerouteUnsupported = "provider.reroute_unsupported"
+	// CodeProviderAPIKeyReadFailed is returned when `provider add-key` cannot
+	// read the key from stdin/the terminal.
+	CodeProviderAPIKeyReadFailed = "provider.api_key_read_failed"
 
 	// translate.* — the pure translator layer (F2.3). A malformed payload or an
 	// unmappable shape fails with translate.failed; a lookup for a (from,to)

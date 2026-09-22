@@ -195,8 +195,8 @@ func TestBuildExecutorWiring(t *testing.T) {
 	}
 
 	// An auth mode the family does not declare is refused.
-	if _, err := f.BuildExecutor(contracts.Credential{Provider: "z.ai", AuthMode: contracts.AuthOAuth}, deps); !hasCode(err, domain.CodeCredentialInvalidAuthMode) {
-		t.Errorf("OAuth BuildExecutor err = %v, want %s", err, domain.CodeCredentialInvalidAuthMode)
+	if _, err := f.BuildExecutor(contracts.Credential{Provider: "z.ai", AuthMode: contracts.AuthOAuth}, deps); !hasCode(err, domain.CodeProviderAuthModeUnsupported) {
+		t.Errorf("OAuth BuildExecutor err = %v, want %s", err, domain.CodeProviderAuthModeUnsupported)
 	}
 }
 

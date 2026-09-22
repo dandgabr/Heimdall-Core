@@ -155,7 +155,6 @@ func redirectPolicy(spec contracts.EgressSpec) func(*http.Request, []*http.Reque
 			return domain.New(domain.CodeUpstreamUnavailable,
 				domain.WithHTTPStatus(http.StatusBadGateway),
 				domain.WithScope(domain.ScopeProvider),
-				domain.WithParams(map[string]string{"reason": "too many redirects"}),
 			)
 		}
 		// Revalidate the scheme of the redirect target; the destination IP is

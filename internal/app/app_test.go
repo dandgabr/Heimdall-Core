@@ -1021,8 +1021,8 @@ func TestProviderListAndStatus(t *testing.T) {
 		}
 	}
 
-	// An empty vault: NO provider is ready. Antigravity is OAuth with no login,
-	// so it is blocked(provider.login_required); the API-key providers have no
+	// An empty vault: NO provider is ready. Antigravity is a FUTURE expansion
+	// (provider.future), NOT a user-fixable block; the API-key providers have no
 	// credential, so they are blocked(provider.no_credential).
 	status := a.ProviderStatus(context.Background())
 	var readyCount int
@@ -1031,8 +1031,11 @@ func TestProviderListAndStatus(t *testing.T) {
 			if s.Ready {
 				t.Error("antigravity reported ready without a credential")
 			}
-			if s.ReasonCode != domain.CodeProviderLoginRequired {
-				t.Errorf("antigravity reason = %q, want %s", s.ReasonCode, domain.CodeProviderLoginRequired)
+			if !s.Future {
+				t.Error("antigravity must be marked Future")
+			}
+			if s.ReasonCode != domain.CodeProviderFuture {
+				t.Errorf("antigravity reason = %q, want %s", s.ReasonCode, domain.CodeProviderFuture)
 			}
 			if s.RiskNotice != "provider.risk_notice.antigravity" {
 				t.Errorf("antigravity status risk notice = %q", s.RiskNotice)
@@ -1052,8 +1055,23 @@ func TestProviderListAndStatus(t *testing.T) {
 		if s.Ready {
 			t.Errorf("%s reported ready with an empty vault", s.ID)
 		}
+		if s.Future {
+			t.Errorf("%s must not be Future", s.ID)
+		}
 		if s.ReasonCode != domain.CodeProviderNoCredential {
 			t.Errorf("%s reason = %q, want %s", s.ID, s.ReasonCode, domain.CodeProviderNoCredential)
+		}
+	}
+
+	// The list view agrees: antigravity is future, the API-key providers are
+	// blocked(provider.no_credential).
+	for _, p := range list {
+		if p.ID == "antigravity" {
+			if !p.Future || p.Ready {
+				t.Errorf("list antigravity = %+v, want future", p)
+			}
+		} else if p.Future {
+			t.Errorf("list %s unexpectedly Future", p.ID)
 		}
 	}
 }

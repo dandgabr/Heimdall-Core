@@ -157,8 +157,8 @@ func TestAuthNoneSendsNoAuth(t *testing.T) {
 func TestAuthOAuthRefused(t *testing.T) {
 	e := mustExecutor(t, Config{Family: "z.ai", BaseURL: "https://x/v1"}, testDeps(doerFunc(func(*http.Request) (*http.Response, error) { return nil, nil }), "s"))
 	_, err := e.Do(context.Background(), contracts.WireRequest{}, contracts.Credential{AuthMode: contracts.AuthOAuth})
-	if !hasCode(err, domain.CodeProviderNoExecutor) {
-		t.Fatalf("err = %v, want %s", err, domain.CodeProviderNoExecutor)
+	if !hasCode(err, domain.CodeProviderAuthModeUnsupported) {
+		t.Fatalf("err = %v, want %s", err, domain.CodeProviderAuthModeUnsupported)
 	}
 }
 

@@ -57,6 +57,12 @@ func Descriptors() map[domain.ProviderID]contracts.ProviderDescriptor {
 			RequiresClientSecret: true,
 			Obfuscation:          antigravityObfuscation(),
 			RiskNotice:           "provider.risk_notice.antigravity",
+			// Antigravity is a planned EXPANSION, not a user-fixable block: the
+			// descriptor is complete, but the OAuth login surface and the router
+			// wiring are not shipped yet. It stays registered (it appears in the
+			// catalog) with the provider.future state.
+			Future:     true,
+			FutureNote: "cloudcode connector; requires OAuth login and router wiring — planned",
 		},
 		ProviderZAI: {
 			ID:          ProviderZAI,

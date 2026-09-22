@@ -53,9 +53,12 @@ func openCredential(deps contracts.ExecutorDeps, cred contracts.Credential) (str
 		}
 		return string(plaintext), nil
 	default:
+		// A stored credential with an unknown mode: credential.invalid_auth_mode
+		// is the right code, but its message expects {id, mode}.
 		return "", domain.New(domain.CodeCredentialInvalidAuthMode,
 			domain.WithHTTPStatus(http.StatusInternalServerError),
 			domain.WithScope(domain.ScopeCredential),
+			domain.WithParams(map[string]string{"id": string(cred.ID), "mode": cred.AuthMode.String()}),
 		)
 	}
 }

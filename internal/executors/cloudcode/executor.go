@@ -257,6 +257,7 @@ func (e *Executor) newRequest(ctx context.Context, url string, env envelope, cre
 			domain.WithHTTPStatus(http.StatusBadRequest),
 			domain.WithScope(domain.ScopeRequest),
 			domain.WithCause(err),
+			domain.WithParams(map[string]string{"reason": "could not build the upstream request"}),
 		)
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -265,6 +266,7 @@ func (e *Executor) newRequest(ctx context.Context, url string, env envelope, cre
 			domain.WithHTTPStatus(http.StatusBadRequest),
 			domain.WithScope(domain.ScopeRequest),
 			domain.WithCause(err),
+			domain.WithParams(map[string]string{"reason": "could not build the upstream request"}),
 		)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -308,6 +310,7 @@ func (e *Executor) buildEnvelope(req contracts.WireRequest, cred contracts.Crede
 			domain.WithHTTPStatus(http.StatusBadRequest),
 			domain.WithScope(domain.ScopeRequest),
 			domain.WithCause(err),
+			domain.WithParams(map[string]string{"reason": "could not build the upstream request"}),
 		)
 	}
 	sessionID := deriveSessionID(cred, req)

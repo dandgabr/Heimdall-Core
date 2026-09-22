@@ -189,11 +189,35 @@ func (b *Bundle) FormatDomainError(err error, lang string) string {
 		// Unknown code and no default entry: surface the code, never blank.
 		return de.Code
 	}
-	// A template that still has placeholders after interpolation means the
-	// caller supplied no params for it; fall back to the code so the operator
-	// sees the stable identifier rather than a broken sentence.
-	if len(params) == 0 && placeholderRe.MatchString(message) {
+	// If the TEMPLATE needs a placeholder the caller did not supply, fall back
+	// to the stable code rather than emit a sentence with a literal "{name}"
+	// (the bug class this guards against). The check is on the template's own
+	// placeholders, not the rendered text, so a param VALUE that legitimately
+	// contains braces (e.g. a JSON reason) does not trigger a false fallback.
+	if missingPlaceholder(b.template(de.Code, lang), params) {
 		return de.Code
 	}
 	return RedactString(message)
+}
+
+// template returns the catalog entry for code in tag, falling back to the
+// default language; it returns "" when the code is unknown.
+func (b *Bundle) template(code, tag string) string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if t, ok := b.catalogs[tag][code]; ok {
+		return t
+	}
+	return b.catalogs[DefaultLanguage][code]
+}
+
+// missingPlaceholder reports whether template contains a {name} placeholder that
+// params does not supply.
+func missingPlaceholder(template string, params map[string]string) bool {
+	for _, m := range placeholderRe.FindAllStringSubmatch(template, -1) {
+		if _, ok := params[m[1]]; !ok {
+			return true
+		}
+	}
+	return false
 }

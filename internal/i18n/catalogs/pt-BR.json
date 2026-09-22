@@ -5,7 +5,7 @@
   "error.unauthorized": "Não autorizado.",
   "error.forbidden_local_only": "Esta rota é restrita a acesso local (loopback).",
   "error.method_not_allowed": "Método não permitido.",
-  "error.upstream_unavailable": "Provedor de upstream indisponível ({status}).",
+  "error.upstream_unavailable": "Provedor de upstream indisponível.",
   "error.upstream_timeout": "O provedor de upstream expirou o tempo limite.",
   "error.bad_upstream_response": "O upstream retornou uma resposta inutilizável.",
   "error.upstream_response_too_large": "A resposta do upstream excedeu o limite de {limit} bytes.",
@@ -65,5 +65,10 @@
   "api.mgmt.token_invalid": "Token de gestão inválido.",
   "provider.risk_notice.antigravity": "Aviso de risco: o Antigravity é usado com uma sessão de assinatura que o fornecedor pode considerar violação de harness. Usá-la como proxy pode causar suspensão ou banimento da conta (ToS/ADR-0003).",
   "provider.login_required": "O provedor {provider} usa login OAuth interativo; conclua o login primeiro (esta sondagem usa uma chave de API estática).",
-  "provider.no_credential": "Nenhuma credencial armazenada para o provedor {provider}; importe ou adicione uma chave primeiro."
+  "provider.no_credential": "Nenhuma credencial armazenada para o provedor {provider}; importe ou adicione uma chave primeiro.",
+  "provider.future": "Expansão futura: {provider} ainda não é utilizável nesta build (requer login/wiring). Listado por completude.",
+  "provider.api_key_not_supported": "O provedor {provider} não aceita API key (modos suportados: {modes}).",
+  "provider.auth_mode_unsupported": "O provedor {provider} não suporta o modo de autenticação {mode}.",
+  "provider.reroute_unsupported": "Reroute não está disponível nesta build: {reason}.",
+  "provider.api_key_read_failed": "Não foi possível ler a API key: {reason}."
 }

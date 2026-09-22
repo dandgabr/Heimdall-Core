@@ -86,6 +86,7 @@ func cleanRequest(gemini []byte, stream bool, sessionID string) (json.RawMessage
 			domain.WithHTTPStatus(400),
 			domain.WithScope(domain.ScopeRequest),
 			domain.WithCause(err),
+			domain.WithParams(map[string]string{"reason": "could not build the upstream request"}),
 		)
 	}
 	return out, nil

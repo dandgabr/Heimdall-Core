@@ -343,6 +343,20 @@ type ProviderDescriptor struct {
 	// Obfuscation is non-empty. It is an i18n code, not prose, like every other
 	// user-facing string.
 	RiskNotice string
+	// Future marks a PLANNED provider whose integration is not complete yet:
+	// the descriptor is fully declared (endpoints, client id, obfuscation) and
+	// the provider is registered so it appears in the catalog, but it is not
+	// usable in this build. It is deliberately DISTINCT from both
+	// PendingEndpoints (an endpoint is unconfirmed) and a missing credential
+	// (the user has not added one): a Future provider is not-ready because the
+	// FEATURE is not shipped, and is reported with provider.future rather than a
+	// "blocked" state that would suggest a user-fixable condition.
+	Future bool
+	// FutureNote is a short, non-localised note explaining what the Future
+	// provider still needs (e.g. "requires OAuth login and router wiring").
+	// It is diagnostic only; the user-facing message is the provider.future i18n
+	// code. Non-empty only when Future is true.
+	FutureNote string
 }
 
 // IsObfuscated reports whether the descriptor declares any obfuscation. It is the

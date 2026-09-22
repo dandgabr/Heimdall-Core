@@ -183,7 +183,10 @@ func (f *OpenAICompat) BuildExecutor(cred contracts.Credential, deps contracts.E
 		)
 	}
 	if !f.supportsAuthMode(cred.AuthMode) {
-		return nil, domain.New(domain.CodeCredentialInvalidAuthMode,
+		// The credential's mode is not one this provider supports: name both the
+		// provider and the offending mode (provider.auth_mode_unsupported), not
+		// the stored-credential code whose message expects {id}.
+		return nil, domain.New(domain.CodeProviderAuthModeUnsupported,
 			domain.WithHTTPStatus(500),
 			domain.WithScope(domain.ScopeCredential),
 			domain.WithParams(map[string]string{"provider": string(f.id), "mode": cred.AuthMode.String()}),

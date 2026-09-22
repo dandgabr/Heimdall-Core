@@ -8,10 +8,14 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -54,6 +58,12 @@ type App struct {
 
 	env    map[string]string
 	server *http.Server
+	// descriptor resolves a provider's static descriptor. It defaults to
+	// auth.Descriptor; it is a field so a test can inject a fake (e.g. a
+	// non-future OAuth descriptor) without mutating the real catalog.
+	descriptor func(domain.ProviderID) (contracts.ProviderDescriptor, error)
+	// sealer overrides the API-key sealer in tests (nil = use a.Secrets).
+	sealer apiKeySealer
 
 	// gateRecords is written by the gate sink, which runs on EVERY request
 	// goroutine, and read by GateRecords. It must be guarded: net/http serves
@@ -170,11 +180,12 @@ func Build(opts Options) (*App, error) {
 	}
 
 	app := &App{
-		Config: cfg,
-		Store:  st,
-		Logger: logger,
-		Bundle: bundle,
-		env:    opts.Env,
+		Config:     cfg,
+		Store:      st,
+		Logger:     logger,
+		Bundle:     bundle,
+		env:        opts.Env,
+		descriptor: auth.Descriptor,
 	}
 
 	// Build the F1 vault layer. The rule is precise:
@@ -393,11 +404,12 @@ func (a *App) ProviderList(ctx context.Context) []ProviderSummary {
 		}
 		summary.PendingEndpoints = auth.PendingFields(id)
 		summary.Ready, summary.ReasonCode, _ = a.providerReadiness(id, modes, creds, listErr)
-		// The ToS risk notice (ADR-0003 §4) is descriptor data; expose it so the
-		// CLI/GUI can warn when an obfuscated provider is enabled. It is an i18n
-		// code, not prose.
-		if desc, err := auth.Descriptor(id); err == nil {
+		// The ToS risk notice (ADR-0003 §4) and the future marker are descriptor
+		// data; expose them so the CLI/GUI can warn (risk) or label a planned
+		// provider (future). Both are i18n codes, not prose.
+		if desc, err := a.descriptorOf(id); err == nil {
 			summary.RiskNotice = desc.RiskNotice
+			summary.Future = desc.Future
 		}
 		out = append(out, summary)
 	}
@@ -427,8 +439,9 @@ func (a *App) ProviderStatus(ctx context.Context) []ProviderStatus {
 			modes = family.AuthModes()
 		}
 		status.Ready, status.ReasonCode, status.Reason = a.providerReadiness(id, modes, creds, listErr)
-		if desc, err := auth.Descriptor(id); err == nil {
+		if desc, err := a.descriptorOf(id); err == nil {
 			status.RiskNotice = desc.RiskNotice
+			status.Future = desc.Future
 		}
 		out = append(out, status)
 	}
@@ -455,7 +468,18 @@ func (a *App) credentialsByProvider(ctx context.Context) (map[domain.ProviderID]
 // providerReadiness is the single readiness rule both list and status use. It
 // returns (ready, i18n code, reason). See ProviderStatus for the taxonomy.
 func (a *App) providerReadiness(id domain.ProviderID, modes []contracts.AuthMode, creds map[domain.ProviderID]contracts.Credential, listErr error) (bool, string, string) {
-	// The flow must be buildable first (pending endpoints outrank credentials):
+	// A FUTURE provider is not-ready because the FEATURE is not shipped, which
+	// outranks every credential/endpoint check: no amount of user action makes
+	// it usable in this build, so it must never be reported as a user-fixable
+	// "blocked" state. It is reported with provider.future.
+	if desc, err := a.descriptorOf(id); err == nil && desc.Future {
+		note := desc.FutureNote
+		if note == "" {
+			note = "planned provider; not usable yet"
+		}
+		return false, domain.CodeProviderFuture, note
+	}
+	// The flow must be buildable next (pending endpoints outrank credentials):
 	// a provider that cannot construct a flow can never execute.
 	if _, err := a.Flows.Build(id); err != nil {
 		return false, domainErrorCode(err), err.Error()
@@ -484,6 +508,15 @@ func supportsAuthMode(modes []contracts.AuthMode, want contracts.AuthMode) bool 
 		}
 	}
 	return false
+}
+
+// descriptorOf resolves a provider's descriptor through the injectable seam,
+// falling back to the real catalog when the App was built without one.
+func (a *App) descriptorOf(id domain.ProviderID) (contracts.ProviderDescriptor, error) {
+	if a.descriptor != nil {
+		return a.descriptor(id)
+	}
+	return auth.Descriptor(id)
 }
 
 // domainErrorCode extracts the i18n code from a *domain.DomainError, or "".
@@ -587,6 +620,115 @@ func (a *App) credentialFor(ctx context.Context, id domain.ProviderID) (contract
 	)
 }
 
+// APIKeyResult reports one `provider add-key` run. It carries no secret.
+type APIKeyResult struct {
+	Provider     domain.ProviderID
+	CredentialID domain.CredentialID
+	Label        string
+	// Upserted is true when an existing credential for this provider+label was
+	// replaced (idempotent re-add), false when a new one was created.
+	Upserted bool
+}
+
+// AddAPIKey seals a plaintext API key and stores it in the vault for provider id.
+// The plaintext comes from the CALLER (the CLI reads it from stdin) and never
+// appears in an argument, a log, an error or the returned result.
+//
+// It is fail-closed and typed:
+//   - an unknown provider                        -> provider.not_found;
+//   - a provider that does not accept AuthAPIKey -> credential.invalid_auth_mode
+//     (an OAuth provider must use the login flow, not a static key);
+//   - a provider with no configured base_url     -> provider.invalid (BuildExecutor);
+//   - no KEK configured                          -> config.secret_missing;
+//   - a key rejected by the offline shape check  -> auth.api_key_invalid_format.
+//
+// It performs NO network I/O. It is idempotent per provider+label: re-adding the
+// same label updates the same row (its deterministic id), so a second run does
+// not create a duplicate.
+func (a *App) AddAPIKey(ctx context.Context, id domain.ProviderID, label, key string) (APIKeyResult, error) {
+	family, err := a.Providers.Get(id)
+	if err != nil {
+		return APIKeyResult{}, err
+	}
+	if !supportsAuthMode(family.AuthModes(), contracts.AuthAPIKey) {
+		// This is about the PROVIDER not accepting API keys (it is OAuth), not a
+		// stored credential with an unknown mode: use the provider-scoped code
+		// and name the modes it DOES support.
+		modes := make([]string, 0, len(family.AuthModes()))
+		for _, m := range family.AuthModes() {
+			modes = append(modes, m.String())
+		}
+		return APIKeyResult{}, domain.New(domain.CodeProviderAPIKeyNotSupported,
+			domain.WithHTTPStatus(400),
+			domain.WithScope(domain.ScopeRequest),
+			domain.WithParams(map[string]string{
+				"provider": string(id),
+				"modes":    strings.Join(modes, ", "),
+			}),
+		)
+	}
+	if a.Secrets == nil {
+		return APIKeyResult{}, domain.New(domain.CodeConfigSecretMissing,
+			domain.WithHTTPStatus(500),
+		)
+	}
+	// Validate the key's SHAPE offline (reuses the API-key flow's checks: empty,
+	// whitespace/control chars, implausible length). This never contacts the
+	// network.
+	if _, err := auth.NewAPIKeyFlow(id, systemClock{}).KeyResult(key, contracts.AccountMeta{}); err != nil {
+		return APIKeyResult{}, err
+	}
+
+	if label == "" {
+		label = string(id)
+	}
+	credID := apiKeyCredentialID(id, label)
+	_, getErr := a.Credentials.Get(ctx, credID)
+	existed := getErr == nil
+
+	// sealer is the app's SecretStore in production; a test injects a fake to
+	// reach the seal-failure branch (which the real Store cannot fail once the
+	// nil/empty-KEK guard above has passed).
+	var sealer apiKeySealer = a.Secrets
+	if a.sealer != nil {
+		sealer = a.sealer
+	}
+	sealed, err := sealer.Seal([]byte(key))
+	if err != nil {
+		return APIKeyResult{}, domain.New(domain.CodeCredentialStoreFailed,
+			domain.WithHTTPStatus(500),
+			domain.WithCause(err),
+			domain.WithParams(map[string]string{"reason": "seal failed"}),
+		)
+	}
+	cred := contracts.Credential{
+		ID:       credID,
+		Provider: id,
+		AuthMode: contracts.AuthAPIKey,
+		Label:    label,
+		Meta:     contracts.AccountMeta{DisplayName: label},
+		Sealed:   []byte(sealed),
+	}
+	if err := a.Credentials.Upsert(ctx, cred); err != nil {
+		return APIKeyResult{}, err
+	}
+	return APIKeyResult{Provider: id, CredentialID: credID, Label: label, Upserted: existed}, nil
+}
+
+// apiKeySealer is the narrow seal port add-key needs. *secret.Store satisfies
+// it; a test injects a failing fake to cover the seal-error branch.
+type apiKeySealer interface {
+	Seal(plaintext []byte) (string, error)
+}
+
+// apiKeyCredentialID derives a deterministic, non-secret CredentialID from
+// provider+label, so add-key is idempotent (a second add updates the same row).
+// The hash is over non-secret inputs only.
+func apiKeyCredentialID(provider domain.ProviderID, label string) domain.CredentialID {
+	sum := sha256.Sum256([]byte("addkey:" + string(provider) + ":" + label))
+	return domain.CredentialID(fmt.Sprintf("key-%s-%s", provider, hex.EncodeToString(sum[:8])))
+}
+
 // domainIDGen adapts domain.NewRequestID to contracts.IDGen.
 type domainIDGen struct{}
 
@@ -605,6 +747,9 @@ type ProviderSummary struct {
 	// ReasonCode is the i18n code explaining a not-ready provider (empty when
 	// Ready). It mirrors ProviderStatus.ReasonCode.
 	ReasonCode string
+	// Future marks a planned provider (descriptor.Future). Reported as a
+	// distinct "future" state, never as a user-fixable "blocked".
+	Future bool
 	// RiskNotice is the i18n code of the ToS warning for an obfuscated provider
 	// (ADR-0003 §4); empty for a provider with no obfuscation.
 	RiskNotice string
@@ -616,6 +761,8 @@ type ProviderStatus struct {
 	Ready      bool
 	Reason     string
 	ReasonCode string
+	// Future mirrors ProviderSummary.Future.
+	Future bool
 	// RiskNotice mirrors ProviderSummary.RiskNotice.
 	RiskNotice string
 }

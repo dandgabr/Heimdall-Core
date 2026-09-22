@@ -501,8 +501,8 @@ func TestGatedExecutorDoRerouteIsExplicit(t *testing.T) {
 	if err == nil {
 		t.Fatal("reroute was silently ignored (no error)")
 	}
-	if !hasCode(err, domain.CodeProviderNoExecutor) {
-		t.Fatalf("err = %v, want %s", err, domain.CodeProviderNoExecutor)
+	if !hasCode(err, domain.CodeProviderRerouteUnsupported) {
+		t.Fatalf("err = %v, want %s", err, domain.CodeProviderRerouteUnsupported)
 	}
 	if inner.doCalled {
 		t.Error("inner ran with the original request despite a reroute")
@@ -525,8 +525,8 @@ func TestGatedExecutorDoStreamRerouteIsExplicit(t *testing.T) {
 	inner := &fakeExecutor{family: "z", stream: &fakeStream{}}
 	g, _ := NewGatedExecutor(inner, chain)
 
-	if _, err := g.DoStream(context.Background(), contracts.WireRequest{}, cred()); !hasCode(err, domain.CodeProviderNoExecutor) {
-		t.Fatalf("err = %v, want %s", err, domain.CodeProviderNoExecutor)
+	if _, err := g.DoStream(context.Background(), contracts.WireRequest{}, cred()); !hasCode(err, domain.CodeProviderRerouteUnsupported) {
+		t.Fatalf("err = %v, want %s", err, domain.CodeProviderRerouteUnsupported)
 	}
 	if inner.doStreamCalled {
 		t.Error("inner stream opened despite a reroute")

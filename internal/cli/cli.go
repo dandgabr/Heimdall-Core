@@ -15,6 +15,7 @@ import (
 	"syscall"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/dandgabr/heimdall-core/internal/app"
 	"github.com/dandgabr/heimdall-core/internal/config"
@@ -245,8 +246,105 @@ func newProviderCmd() *cobra.Command {
 		Use:   "provider",
 		Short: "Inspect and import provider credentials",
 	}
-	provider.AddCommand(newProviderListCmd(), newProviderStatusCmd(), newProviderImportCmd(), newProviderTestCmd())
+	provider.AddCommand(newProviderListCmd(), newProviderStatusCmd(), newProviderImportCmd(), newProviderTestCmd(), newProviderAddKeyCmd())
 	return provider
+}
+
+// cliStdin is the input source for `provider add-key`. It is a package variable
+// so a test can drive the command without touching the process stdin; production
+// uses os.Stdin.
+var cliStdin io.Reader = os.Stdin
+
+// terminalFd returns the fd of a reader that is an interactive terminal, and
+// whether it is one. It is a seam so a test can exercise the no-echo branch
+// without a real TTY.
+var terminalFd = func(r io.Reader) (uintptr, bool) {
+	f, ok := r.(*os.File)
+	if !ok {
+		return 0, false
+	}
+	fd := f.Fd()
+	return fd, term.IsTerminal(int(fd))
+}
+
+// readPasswordNoEcho reads a line from a terminal fd without echo. It is a seam
+// over term.ReadPassword.
+var readPasswordNoEcho = func(fd uintptr) ([]byte, error) {
+	return term.ReadPassword(int(fd))
+}
+
+// readSecretNoEcho reads an API key WITHOUT echoing it. On a terminal it uses
+// term.ReadPassword (no echo); otherwise it reads from the non-terminal reader
+// (a pipe/file, where echo does not apply). A single trailing newline is
+// trimmed; interior whitespace is preserved (the shape check rejects it later).
+func readSecretNoEcho(in io.Reader, prompt io.Writer) (string, error) {
+	if fd, ok := terminalFd(in); ok {
+		if prompt != nil {
+			_, _ = fmt.Fprint(prompt, "API key: ")
+		}
+		raw, err := readPasswordNoEcho(fd)
+		if prompt != nil {
+			_, _ = fmt.Fprintln(prompt)
+		}
+		if err != nil {
+			return "", domain.New(domain.CodeProviderAPIKeyReadFailed,
+				domain.WithHTTPStatus(500),
+				domain.WithCause(err),
+				domain.WithParams(map[string]string{"reason": "could not read the key from the terminal"}),
+			)
+		}
+		return strings.TrimRight(string(raw), "\r\n"), nil
+	}
+	raw, err := io.ReadAll(in)
+	if err != nil {
+		return "", domain.New(domain.CodeProviderAPIKeyReadFailed,
+			domain.WithHTTPStatus(500),
+			domain.WithCause(err),
+			domain.WithParams(map[string]string{"reason": "could not read the key from stdin"}),
+		)
+	}
+	return strings.TrimRight(string(raw), "\r\n"), nil
+}
+
+func newProviderAddKeyCmd() *cobra.Command {
+	var (
+		configPath string
+		label      string
+	)
+	cmd := &cobra.Command{
+		Use:   "add-key <provider-id>",
+		Short: "Add an API key for a provider (read from stdin, sealed into the vault)",
+		Long: "Add an API key for an API-key provider.\n\n" +
+			"The key is read from STDIN and NEVER from a command-line argument (which\n" +
+			"would leak into the shell history and `ps`). On a terminal the prompt does\n" +
+			"not echo; piped input is read directly:\n\n" +
+			"    printf '%s' \"$KEY\" | heimdall provider add-key z.ai --label work",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			instance, err := buildReadOnly(configPath)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = instance.Close() }()
+
+			key, err := readSecretNoEcho(cliStdin, cmd.ErrOrStderr())
+			if err != nil {
+				return err
+			}
+			id := domain.ProviderID(args[0])
+			res, err := instance.AddAPIKey(cmd.Context(), id, label, key)
+			if err != nil {
+				return err
+			}
+			// Report the id, label and provider only; NEVER the key.
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s\tprovider=%s\tlabel=%s\n",
+				res.CredentialID, res.Provider, res.Label)
+			return err
+		},
+	}
+	cmd.Flags().StringVar(&configPath, "config", "", "path to the TOML configuration file")
+	cmd.Flags().StringVar(&label, "label", "", "human label for the credential (defaults to the provider id)")
+	return cmd
 }
 
 func newProviderListCmd() *cobra.Command {
@@ -285,10 +383,17 @@ func renderProviderList(out io.Writer, list []app.ProviderSummary, bundle *i18n.
 	lang := cliLanguage(bundle)
 	for _, p := range list {
 		modes := strings.Join(p.AuthModes, ",")
-		state := providerState(p.Ready, p.ReasonCode, p.PendingEndpoints)
+		state := providerState(p.Ready, p.Future, p.ReasonCode, p.PendingEndpoints)
 		if _, err := fmt.Fprintf(out, "%s\tprotocol=%s\tauth=%s\t%s\n",
 			p.ID, p.Protocol, modes, state); err != nil {
 			return err
+		}
+		// A future provider shows its distinct state plus the localised
+		// provider.future message (a planned expansion, not a user-fixable block).
+		if p.Future {
+			if _, err := fmt.Fprintf(out, "  > %s\n", bundle.Format(lang, domain.CodeProviderFuture, map[string]string{"provider": string(p.ID)})); err != nil {
+				return err
+			}
 		}
 		if p.RiskNotice != "" {
 			if _, err := fmt.Fprintf(out, "  ! %s\n", bundle.Format(lang, p.RiskNotice, nil)); err != nil {
@@ -301,7 +406,14 @@ func renderProviderList(out io.Writer, list []app.ProviderSummary, bundle *i18n.
 
 // providerState renders the shared state label for a provider row. Both
 // `provider list` and `provider status` use it, so the two views cannot drift.
-func providerState(ready bool, reasonCode string, pending []string) string {
+//
+// A future provider shows the dedicated "future" label rather than
+// "blocked(provider.future)": it is a planned expansion, not a user-fixable
+// condition.
+func providerState(ready, future bool, reasonCode string, pending []string) string {
+	if future {
+		return "future"
+	}
 	if len(pending) > 0 {
 		return "pending: " + strings.Join(pending, ",")
 	}
@@ -342,9 +454,14 @@ func writeProviderStatus(out io.Writer, instance *app.App, ctx context.Context) 
 func renderProviderStatus(out io.Writer, list []app.ProviderStatus, bundle *i18n.Bundle) error {
 	lang := cliLanguage(bundle)
 	for _, s := range list {
-		state := providerState(s.Ready, s.ReasonCode, nil)
+		state := providerState(s.Ready, s.Future, s.ReasonCode, nil)
 		if _, err := fmt.Fprintf(out, "%s\t%s\n", s.ID, state); err != nil {
 			return err
+		}
+		if s.Future {
+			if _, err := fmt.Fprintf(out, "  > %s\n", bundle.Format(lang, domain.CodeProviderFuture, map[string]string{"provider": string(s.ID)})); err != nil {
+				return err
+			}
 		}
 		if s.RiskNotice != "" {
 			if _, err := fmt.Fprintf(out, "  ! %s\n", bundle.Format(lang, s.RiskNotice, nil)); err != nil {

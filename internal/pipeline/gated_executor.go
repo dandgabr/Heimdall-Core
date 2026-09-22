@@ -128,10 +128,10 @@ func (g *GatedExecutor) DoStream(ctx context.Context, req contracts.WireRequest,
 // (SEC-10). Until the Dispatcher lands, a reroute is an explicit refusal rather
 // than a silent no-op.
 func rerouteUnsupported() error {
-	return domain.New(domain.CodeProviderNoExecutor,
+	return domain.New(domain.CodeProviderRerouteUnsupported,
 		domain.WithHTTPStatus(http.StatusNotImplemented),
 		domain.WithScope(domain.ScopeRequest),
-		domain.WithParams(map[string]string{"reason": "reroute requires the F3 dispatcher"}),
+		domain.WithParams(map[string]string{"reason": "requires the F3 dispatcher"}),
 	)
 }
 

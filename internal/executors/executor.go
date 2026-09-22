@@ -163,15 +163,18 @@ func (e *Executor) openCredential(cred contracts.Credential) (string, error) {
 	case contracts.AuthOAuth:
 		// OAuth material is refreshed by the F3 Dispatcher before the executor is
 		// called; until then an OAuth credential reaching here is a wiring error.
-		return "", domain.New(domain.CodeProviderNoExecutor,
+		return "", domain.New(domain.CodeProviderAuthModeUnsupported,
 			domain.WithHTTPStatus(http.StatusNotImplemented),
 			domain.WithScope(domain.ScopeCredential),
-			domain.WithParams(map[string]string{"reason": "oauth execution lands in F3"}),
+			domain.WithParams(map[string]string{"provider": string(e.cfg.Family), "mode": cred.AuthMode.String()}),
 		)
 	default:
+		// A credential whose mode is unknown: this is the stored-credential case
+		// credential.invalid_auth_mode describes, so pass its {id, mode} params.
 		return "", domain.New(domain.CodeCredentialInvalidAuthMode,
 			domain.WithHTTPStatus(http.StatusInternalServerError),
 			domain.WithScope(domain.ScopeCredential),
+			domain.WithParams(map[string]string{"id": string(cred.ID), "mode": cred.AuthMode.String()}),
 		)
 	}
 }
@@ -191,6 +194,7 @@ func (e *Executor) buildRequest(ctx context.Context, req contracts.WireRequest, 
 			domain.WithHTTPStatus(http.StatusBadRequest),
 			domain.WithScope(domain.ScopeRequest),
 			domain.WithCause(err),
+			domain.WithParams(map[string]string{"reason": "could not build the upstream request"}),
 		)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -239,6 +243,7 @@ func (e *Executor) Probe(ctx context.Context, cred contracts.Credential) (int, e
 			domain.WithHTTPStatus(http.StatusBadRequest),
 			domain.WithScope(domain.ScopeRequest),
 			domain.WithCause(err),
+			domain.WithParams(map[string]string{"reason": "could not build the upstream request"}),
 		)
 	}
 	httpReq.Header.Set("Accept", "application/json")
@@ -319,6 +324,7 @@ func (e *Executor) CountTokens(ctx context.Context, req contracts.WireRequest, m
 			domain.WithHTTPStatus(http.StatusBadRequest),
 			domain.WithScope(domain.ScopeRequest),
 			domain.WithCause(err),
+			domain.WithParams(map[string]string{"reason": "could not build the upstream request"}),
 		)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")

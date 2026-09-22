@@ -304,20 +304,20 @@ func TestProviderListCommand(t *testing.T) {
 	if strings.Contains(text, "pending") {
 		t.Errorf("no provider should be pending after Wave 2: %s", text)
 	}
-	// Honest state: an empty vault means NO provider is ready. Antigravity is
-	// OAuth with no login -> blocked(provider.login_required); API-key providers have
-	// no credential -> blocked(provider.no_credential). Never a bare "ready".
+	// Honest state: an empty vault means NO provider is ready. Antigravity is a
+	// FUTURE expansion -> "future" (not a user-fixable block); API-key providers
+	// have no credential -> blocked(provider.no_credential). Never a bare "ready".
 	if strings.Contains(text, "\tready") {
 		t.Errorf("provider list showed a ready provider with an empty vault: %s", text)
 	}
-	if !strings.Contains(text, "blocked(provider.login_required)") {
-		t.Errorf("antigravity should be blocked(provider.login_required): %s", text)
+	if !strings.Contains(text, "antigravity\tprotocol=cloudcode\tauth=oauth\tfuture") {
+		t.Errorf("antigravity should be future: %s", text)
 	}
 	if !strings.Contains(text, "blocked(provider.no_credential)") {
 		t.Errorf("API-key providers should be blocked(provider.no_credential): %s", text)
 	}
-	// The Antigravity risk notice must appear; the API-key lines must not carry
-	// a risk marker.
+	// The Antigravity risk notice must appear (plus the future marker); the
+	// API-key lines must not carry a risk marker.
 	lines := strings.Split(text, "\n")
 	var agLine, zLine string
 	for i, l := range lines {
@@ -325,6 +325,9 @@ func TestProviderListCommand(t *testing.T) {
 			agLine = l
 			if i+1 < len(lines) {
 				agLine += "\n" + lines[i+1]
+			}
+			if i+2 < len(lines) {
+				agLine += "\n" + lines[i+2]
 			}
 		}
 		if strings.HasPrefix(l, "z.ai\t") {
@@ -337,14 +340,17 @@ func TestProviderListCommand(t *testing.T) {
 	if !strings.Contains(agLine, "!") {
 		t.Errorf("antigravity risk notice missing:\n%s", agLine)
 	}
-	if strings.Contains(zLine, "!") {
-		t.Errorf("z.ai must not carry a risk notice:\n%s", zLine)
+	if !strings.Contains(agLine, ">") {
+		t.Errorf("antigravity future marker missing:\n%s", agLine)
+	}
+	if strings.Contains(zLine, "!") || strings.Contains(zLine, ">") {
+		t.Errorf("z.ai must not carry a risk/future marker:\n%s", zLine)
 	}
 }
 
 // TestProviderStatusCommand is the P0-B CLI guard: with an EMPTY vault, status
-// must NOT report ready. Antigravity is blocked(provider.login_required) (no login
-// yet) and the API-key providers are blocked(provider.no_credential).
+// must NOT report ready. Antigravity shows "future" (planned expansion) and the
+// API-key providers are blocked(provider.no_credential).
 func TestProviderStatusCommand(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "heimdall.toml")
@@ -363,11 +369,14 @@ func TestProviderStatusCommand(t *testing.T) {
 	if strings.Contains(text, "antigravity\tready") {
 		t.Errorf("antigravity must not be ready without login: %s", text)
 	}
-	if !strings.Contains(text, "antigravity\tblocked(provider.login_required)") {
-		t.Errorf("antigravity should be blocked(provider.login_required): %s", text)
+	if !strings.Contains(text, "antigravity\tfuture") {
+		t.Errorf("antigravity should be future: %s", text)
 	}
 	if !strings.Contains(text, "!") {
 		t.Errorf("antigravity risk notice missing: %s", text)
+	}
+	if !strings.Contains(text, ">") {
+		t.Errorf("antigravity future marker missing: %s", text)
 	}
 	if strings.Contains(text, "z.ai\tready") {
 		t.Errorf("z.ai must not be ready without a credential: %s", text)
@@ -693,5 +702,19 @@ func TestRenderRiskNoticeWriteError(t *testing.T) {
 	statuses := []app.ProviderStatus{{ID: "a", RiskNotice: "provider.risk_notice.antigravity"}}
 	if err := renderProviderStatus(&cliNthFailWriter{n: 2}, statuses, bundle); err == nil {
 		t.Error("expected the status notice write error")
+	}
+}
+
+// TestRenderFutureMarkerWriteError covers the future-marker write failure (the
+// first extra line after the provider row).
+func TestRenderFutureMarkerWriteError(t *testing.T) {
+	bundle := i18n.MustNew()
+	list := []app.ProviderSummary{{ID: "antigravity", Future: true, ReasonCode: domain.CodeProviderFuture}}
+	if err := renderProviderList(&cliNthFailWriter{n: 2}, list, bundle); err == nil {
+		t.Error("expected the future-marker write error")
+	}
+	statuses := []app.ProviderStatus{{ID: "antigravity", Future: true, ReasonCode: domain.CodeProviderFuture}}
+	if err := renderProviderStatus(&cliNthFailWriter{n: 2}, statuses, bundle); err == nil {
+		t.Error("expected the status future-marker write error")
 	}
 }
