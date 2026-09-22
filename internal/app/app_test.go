@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -861,12 +862,14 @@ func freePort(t *testing.T) int {
 // be invoked for a real request through the assembled handler, and it must never
 // record a body or a credential.
 func TestGateLoggerRunsInRequestPath(t *testing.T) {
-	a := buildTestApp(t)
+	a, logBuf := buildTestAppWithLog(t)
 
-	const secret = "sk-live-GATE-MUST-NOT-SEE-THIS-123456"
+	const secret = "SUPER-SECRET-TOKEN"
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	req.RemoteAddr = "127.0.0.1:1234"
 	req.Header.Set("Authorization", "Bearer "+secret)
+	req.Header.Set("Cookie", "session="+secret)
+	req.Header.Set("X-Management-Token", secret)
 	rec := httptest.NewRecorder()
 	a.Handler().ServeHTTP(rec, req)
 
@@ -878,13 +881,16 @@ func TestGateLoggerRunsInRequestPath(t *testing.T) {
 	if len(records) == 0 {
 		t.Fatal("gate logger never ran in the request path")
 	}
-	var sawPre, sawPost bool
+	var sawPre, sawPost, sawAuthName bool
 	for _, r := range records {
 		if r["stage"] == "pre_request" {
 			sawPre = true
 		}
 		if r["stage"] == "post_response" {
 			sawPost = true
+		}
+		if strings.Contains(r["header_names"], "Authorization") {
+			sawAuthName = true
 		}
 		for k, v := range r {
 			if strings.Contains(v, secret) {
@@ -895,7 +901,74 @@ func TestGateLoggerRunsInRequestPath(t *testing.T) {
 	if !sawPre || !sawPost {
 		t.Errorf("gate stages seen: pre=%v post=%v, want both", sawPre, sawPost)
 	}
+	// The observer hands names only, so the header NAME must be present...
+	if !sawAuthName {
+		t.Errorf("header_names does not include Authorization: %+v", records)
+	}
+	// ...and the structured log must not carry the value either.
+	if strings.Contains(logBuf.String(), secret) {
+		t.Fatalf("gate log leaked a credential: %s", logBuf.String())
+	}
 }
+
+// TestObserverHandsHeaderNamesNotValues is the SEC-13 regression guard at the
+// observer boundary: a gate must receive the header NAMES but never a value, so
+// even a gate that reads in.Headers cannot recover an Authorization/Cookie token.
+func TestObserverHandsHeaderNamesNotValues(t *testing.T) {
+	const secret = "SUPER-SECRET-TOKEN"
+	var seen http.Header
+	gate := headerCaptureGate{onPre: func(in contracts.GateInput) { seen = in.Headers }}
+	chain, err := pipeline.New([]contracts.Gate{gate})
+	if err != nil {
+		t.Fatalf("pipeline.New: %v", err)
+	}
+	observer, err := pipeline.NewObserver(chain)
+	if err != nil {
+		t.Fatalf("NewObserver: %v", err)
+	}
+
+	handler := observer.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.Header.Set("Authorization", "Bearer "+secret)
+	req.Header.Set("Cookie", "session="+secret)
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	if seen.Get("Authorization") != "" || seen.Get("Cookie") != "" {
+		t.Fatalf("observer handed header VALUES to the gate: Authorization=%q Cookie=%q",
+			seen.Get("Authorization"), seen.Get("Cookie"))
+	}
+	if _, ok := seen["Authorization"]; !ok {
+		t.Error("observer dropped the Authorization header NAME entirely")
+	}
+	if _, ok := seen["Cookie"]; !ok {
+		t.Error("observer dropped the Cookie header NAME entirely")
+	}
+}
+
+// headerCaptureGate is a minimal Gate that records the PreRequest input.
+type headerCaptureGate struct {
+	onPre func(contracts.GateInput)
+}
+
+func (headerCaptureGate) ID() string { return "capture" }
+func (headerCaptureGate) Stages() contracts.GateStageSet {
+	return contracts.StageSet(contracts.StagePreRequest)
+}
+func (headerCaptureGate) RequiredCaps() contracts.GateCaps       { return 0 }
+func (headerCaptureGate) FailurePolicy() contracts.FailurePolicy { return contracts.FailOpen }
+func (g headerCaptureGate) PreRequest(_ context.Context, in contracts.GateInput) (contracts.Decision, error) {
+	if g.onPre != nil {
+		g.onPre(in)
+	}
+	return contracts.Decision{Kind: contracts.DecisionContinue}, nil
+}
+func (headerCaptureGate) OnResponseChunk(context.Context, contracts.ChunkInput) (contracts.ChunkDecision, error) {
+	return contracts.ChunkDecision{Kind: contracts.ChunkPassThrough}, nil
+}
+func (headerCaptureGate) PostResponse(context.Context, contracts.GateInput) error { return nil }
+func (headerCaptureGate) Close() error                                            { return nil }
 
 // TestProviderListAndStatus is the P0-A CLI surface: listing and status work
 // without any key and report the pending Antigravity endpoints.
@@ -1396,5 +1469,59 @@ func TestRunShutdownError(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return")
+	}
+}
+
+// TestHandlerConcurrentRequestsNoRace is the regression guard for the gate-sink
+// data race: net/http serves requests concurrently, so 200 simultaneous loopback
+// requests must record gate metadata without racing. Run under -race this fails
+// if the sink appends to gateRecords unsynchronized. It also asserts the records
+// are consistent (a copy, with a valid stage on every entry).
+func TestHandlerConcurrentRequestsNoRace(t *testing.T) {
+	a := buildTestApp(t)
+	handler := a.Handler()
+
+	const requests = 200
+	var wg sync.WaitGroup
+	wg.Add(requests)
+	start := make(chan struct{})
+	for i := 0; i < requests; i++ {
+		go func() {
+			defer wg.Done()
+			<-start // release all goroutines together to maximise contention
+			req := httptest.NewRequest(http.MethodGet, "/health", nil)
+			req.RemoteAddr = "127.0.0.1:1234" // loopback so LocalOnly admits it
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				// Do not t.Fatalf from a goroutine; record and let the main
+				// goroutine fail below.
+				t.Errorf("health status = %d, want 200", rec.Code)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	records := a.GateRecords()
+	// Each request runs PreRequest + PostResponse through the logger gate, so at
+	// least one record per request is expected (capped at gateRecordCap).
+	if len(records) == 0 {
+		t.Fatal("no gate records after concurrent requests")
+	}
+	if len(records) > gateRecordCap {
+		t.Fatalf("gate records = %d, want <= cap %d", len(records), gateRecordCap)
+	}
+	for _, r := range records {
+		if r["stage"] == "" {
+			t.Fatalf("gate record missing stage: %+v", r)
+		}
+	}
+
+	// The getter must return a COPY: mutating it must not affect the internal
+	// state, and a second read must be unaffected.
+	records[0]["stage"] = "tampered"
+	if again := a.GateRecords(); again[0]["stage"] == "tampered" {
+		t.Fatal("GateRecords returned the internal slice, not a copy")
 	}
 }

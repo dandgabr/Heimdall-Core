@@ -46,11 +46,17 @@ func (o *Observer) Handler(next http.Handler) http.Handler {
 		}
 
 		// Build the gate input from metadata only. Provider/credential/model are
-		// not resolved at this layer yet (the router is F3), so they stay empty;
-		// the header NAMES are passed, never the values.
+		// not resolved at this layer yet (the router is F3), so they stay empty.
+		//
+		// Headers carries NAMES ONLY: each key maps to an empty value string.
+		// r.Header.Clone() would hand a gate the literal Authorization, Cookie
+		// and X-Management-Token values, contradicting SEC-13 ("the minimum a
+		// gate needs") before any redaction runs. A gate that needs a specific
+		// value must declare it explicitly (capability) in a later phase; that
+		// value will then be served redacted, never by reading this map.
 		in := contracts.GateInput{
 			RequestID: requestID,
-			Headers:   r.Header.Clone(),
+			Headers:   headerNamesOnly(r.Header),
 			Meta: map[string]string{
 				"http.method": r.Method,
 				"http.path":   r.URL.Path,
@@ -78,4 +84,16 @@ func (o *Observer) Handler(next http.Handler) http.Handler {
 		// an error must not change it.
 		_ = o.chain.PostResponse(r.Context(), in)
 	})
+}
+
+// headerNamesOnly returns a header map whose keys are the request's header
+// NAMES and whose every value is an empty string. It is the metadata-only view
+// a gate receives at this phase: enough to see that Authorization or Cookie was
+// present, never enough to read its value.
+func headerNamesOnly(src http.Header) http.Header {
+	names := make(http.Header, len(src))
+	for name := range src {
+		names[name] = nil
+	}
+	return names
 }

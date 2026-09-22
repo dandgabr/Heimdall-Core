@@ -363,26 +363,60 @@ func TestMatchErrorBranches(t *testing.T) {
 // TestOAuthCodeGuardBranches covers every decision path of the entropy guard.
 func TestOAuthCodeGuardBranches(t *testing.T) {
 	tests := map[string]bool{
-		"aB3xK9":           true,  // digit + mixed case
-		"abc123":           true,  // digit + lower
-		"ABCDEF12":         true,  // digit + upper
-		"QwErTy":           true,  // mixed case, no digit
-		"a.b/cd":           true,  // decisive symbol
-		"a+b=cde":          true,  // symbol
-		"200":              false, // too short
-		"200404":           false, // all digits
-		"123456":           false, // all digits
-		"not_found":        false, // snake_case word
-		"authorization_x":  false, // snake_case word
-		"ready":            false, // lower word (short)
-		"expired":          false, // lower word (short)
-		"abcdefghijklmnop": true,  // long lowercase run
-		"abcdefghijklmno":  false, // 15-char lowercase run
-		"inválido":         false, // non-ASCII word
+		"aB3xK9":                           true,  // digit + mixed case
+		"abc123":                           true,  // digit + lower
+		"ABCDEF12":                         true,  // digit + upper
+		"a.b/cd":                           true,  // decisive symbol
+		"a+b=cde":                          true,  // symbol
+		"200":                              false, // too short
+		"200404":                           false, // all digits
+		"123456":                           false, // all digits
+		"not_found":                        false, // short/2-segment snake_case word
+		"invalid_grant":                    false, // 2-segment snake_case word
+		"authorization_pending":            false, // long but 2-segment snake_case word
+		"abcdef_ghij_klmn_opqr":            true,  // long AND 3+ segments: base64url token
+		"abcdefghijklmnop":                 true,  // long lowercase run
+		"abcdefghijklmno":                  false, // 15-char lowercase run
+		"QwErTy":                           false, // CamelCase word (no entropy)
+		"NotFound":                         false, // CamelCase technical identifier
+		"AuthorizationPending":             false, // longest plausible CamelCase word
+		"AbCdEfGhIjKlMnOpQrStUvWx":         true,  // 24-char mixed run
+		"abcdefghijklmnopqrstuvwxyzABCDEF": true,  // >= longCamelLen mixed run
+		"ready":                            false, // lower word (short)
+		"expired":                          false, // lower word (short)
+		"inválido":                         false, // non-ASCII word
 	}
 	for value, want := range tests {
 		if got := oauthCodeGuard(value); got != want {
 			t.Errorf("oauthCodeGuard(%q) = %v, want %v", value, got, want)
+		}
+	}
+}
+
+// TestOAuthCodeGuardShortCodeRegression pins the specific values from the
+// re-check: the lowercase+separator token must be masked, the clean CamelCase
+// identifiers must survive, and the pure-long runs must stay masked.
+func TestOAuthCodeGuardShortCodeRegression(t *testing.T) {
+	// (mask) a lowercase + separator token long enough to be a base64url run.
+	if !oauthCodeGuard("abcdef_ghij_klmn_opqr") {
+		t.Error("a long multi-segment separator token was not masked")
+	}
+	// (keep) clean CamelCase technical identifiers.
+	for _, v := range []string{"NotFound", "AuthorizationPending", "InvalidGrant"} {
+		if oauthCodeGuard(v) {
+			t.Errorf("clean CamelCase %q was masked", v)
+		}
+	}
+	// (keep) the named snake_case identifiers, including the long one.
+	for _, v := range []string{"not_found", "invalid_grant", "authorization_pending"} {
+		if oauthCodeGuard(v) {
+			t.Errorf("snake_case identifier %q was masked", v)
+		}
+	}
+	// (mask) the long pure-letter runs.
+	for _, v := range []string{"abcdefghijklmnop", "abcdefghijklmnopqrst", "abcdefghijklmnopqrstuvwxyz01"} {
+		if !oauthCodeGuard(v) {
+			t.Errorf("long token-like run %q was not masked", v)
 		}
 	}
 }

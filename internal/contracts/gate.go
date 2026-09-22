@@ -160,8 +160,14 @@ type GateInput struct {
 	Provider   domain.ProviderID
 	Credential domain.CredentialID
 	Model      domain.ModelID
-	// Headers are the request headers. Auth headers are already stripped by the
-	// executor boundary, so a gate never sees an upstream token.
+	// Headers carries request header NAMES ONLY: at this phase every key maps to
+	// an empty value, so a gate can see that Authorization/Cookie is present but
+	// cannot read its value. This enforces SEC-13 ("the minimum a gate needs") at
+	// the HTTP boundary, before any redaction runs.
+	//
+	// A gate that needs a specific header VALUE must declare it explicitly (a
+	// capability) in a later phase; that value will then be served redacted, and
+	// never by simply reading this map. Do NOT rely on Headers for content.
 	Headers http.Header
 	// Body is the request payload, or nil when the gate did not ask for it.
 	Body []byte

@@ -51,25 +51,39 @@ const oauthShortFieldNames = `code|state`
 const minOAuthCodeLen = 6
 
 // oauthCodeGuard decides whether a value following `code`/`state` is a secret
-// rather than ordinary prose.
+// rather than ordinary prose or a technical identifier.
 //
-// The earlier version required >= 20 chars, which let a genuinely short code or
-// state leak. The criterion here is ENTROPY-SHAPED, not length-shaped. After the
-// minimum length, the decision is:
+// The criterion is ENTROPY-SHAPED, not length-shaped. After the minimum length:
 //
 //  1. all-digit values ("200", "404") are HTTP statuses/counts, never secrets;
-//  2. a value with a base64url/base64 symbol (- _ . / + =) is a credential;
-//  3. a value mixing a digit with a letter ("aB3xK9z", "abc123") is a credential;
-//  4. a value mixing upper and lower case ("QwErTy") is a credential;
-//  5. anything else is a pure letter run. A SHORT one is a word ("ready",
-//     "expired", "null") and survives; a LONG one (>= longRunLen) is far more
-//     likely a lowercase hex/base64 token, so it is masked.
+//  2. a decisive symbol ('.', '/', '+', '=') marks a token: these do not occur in
+//     the technical CamelCase/snake_case identifiers these fields carry;
+//  3. a digit together with a letter ("aB3xK9z", "abc123") marks a token;
+//  4. a separator ('_', '-') is ambiguous: it appears in snake_case identifiers
+//     ("not_found", "authorization_pending") AND in base64url tokens. Length
+//     alone cannot separate them — "authorization_pending" and
+//     "abcdef_ghij_klmn_opqr" are both 21 chars — so the value is masked only
+//     when it is BOTH long (>= longRunLen) AND fragmented into >= 3 segments
+//     (>= 2 separators). A real snake_case identifier is two words; a base64url
+//     token with separators has several segments. A two-segment lowercase run
+//     therefore survives (accepted residual, matching the identifier shape); a
+//     three-or-more-segment run is treated as a token;
+//  5. a pure CamelCase run with no entropy signal is a technical identifier word
+//     ("NotFound", "AuthorizationPending", "InvalidGrant") and survives, UNLESS
+//     it is far longer than any plausible compound word (>= longCamelLen), where
+//     an unbroken mixed-case blob is more likely a token;
+//  6. finally, a pure single-case letter run is masked when long enough to be a
+//     lowercase hex/base64 token (>= longRunLen).
+//
+// A value with an entropy signal (a digit or a decisive symbol) is always masked,
+// however it is cased, so a JWT/base64url token cannot slip through rule 5.
 func oauthCodeGuard(value string) bool {
 	if len(value) < minOAuthCodeLen {
 		return false
 	}
 
-	var hasDigit, hasUpper, hasLower, hasSep, hasSymbol bool
+	var hasDigit, hasUpper, hasLower, hasSymbol bool
+	separators := 0
 	for _, r := range value {
 		switch {
 		case r >= '0' && r <= '9':
@@ -80,9 +94,9 @@ func oauthCodeGuard(value string) bool {
 			hasLower = true
 		case r == '_' || r == '-':
 			// A separator: a snake_case/kebab identifier uses these, and so does
-			// base64url. On its own it is ambiguous, so it is tracked separately
-			// from a decisive symbol.
-			hasSep = true
+			// base64url. Counted, not just flagged, because the number of
+			// segments is what separates a two-word identifier from a token.
+			separators++
 		case r > unicode.MaxASCII:
 			// A non-ASCII letter is a word character, never a code symbol.
 			hasLower = true
@@ -92,18 +106,21 @@ func oauthCodeGuard(value string) bool {
 	}
 
 	switch {
-	case hasDigit && !hasUpper && !hasLower && !hasSymbol && !hasSep:
+	case hasDigit && !hasUpper && !hasLower && !hasSymbol && separators == 0:
 		return false // all digits: status/count ("200", "404")
 	case hasSymbol:
 		return true // '.', '/', '+', '=' : decisively a token
-	case hasDigit && (hasUpper || hasLower):
-		return true // digit + letter: "aB3xK9z", "abc123"
+	case hasDigit:
+		return true // digit + letter: "aB3xK9z", "abc123", "jwt2"
+	case separators > 0:
+		// Ambiguous separator: mask when the value is long AND fragmented into
+		// >= 3 segments (>= 2 separators). A two-word snake_case identifier
+		// (one separator) survives; a multi-segment base64url run does not.
+		return len(value) >= longRunLen && separators >= 2
 	case hasUpper && hasLower:
-		return true // mixed case: "QwErTy"
-	case hasSep:
-		// A lowercase identifier with separators ("not_found",
-		// "authorization_pending") is word-shaped and survives.
-		return false
+		// Clean CamelCase word (no digit/symbol/separator): normally a technical
+		// identifier, masked only when far longer than a compound word.
+		return len(value) >= longCamelLen
 	default:
 		// Pure single-case letter run. Mask only when long enough to be a
 		// lowercase hex/base64 token rather than a word.
@@ -115,6 +132,14 @@ func oauthCodeGuard(value string) bool {
 // as a token rather than a word. It matches the heuristic the generic
 // space-separated rule already uses.
 const longRunLen = 16
+
+// longCamelLen is the length at or above which a mixed-case run with no digit or
+// symbol is treated as a token rather than a compound word. The longest plausible
+// technical identifier here is "AuthorizationPending" (20), so 24 leaves a small
+// margin while catching an unbroken mixed-case blob; a real base64url/JWT token
+// virtually always contains a digit or symbol and is caught earlier by rule 2/3,
+// so this is a backstop, not the primary discriminator.
+const longCamelLen = 24
 
 // tokenChars is the set of characters that can appear inside a credential
 // (JWT/hex/base64url): dots, dashes, underscores, slashes, plus signs and

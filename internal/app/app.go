@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/dandgabr/heimdall-core/internal/api/mgmt"
@@ -49,8 +50,14 @@ type App struct {
 	// Gates is the frozen gate chain, wired with the F1 logger gate.
 	Gates *pipeline.Chain
 
-	env         map[string]string
-	server      *http.Server
+	env    map[string]string
+	server *http.Server
+
+	// gateRecords is written by the gate sink, which runs on EVERY request
+	// goroutine, and read by GateRecords. It must be guarded: net/http serves
+	// requests concurrently, so an unchecked append would race the slice header
+	// (and growslice) against readers. gateMu is held for the whole read/write.
+	gateMu      sync.Mutex
 	gateRecords []map[string]string
 }
 
@@ -391,9 +398,12 @@ func (a *App) wireGates() error {
 		for k, v := range fields {
 			record[k] = v
 		}
+		// Serialize the bounded buffer against concurrent request goroutines.
+		a.gateMu.Lock()
 		if len(a.gateRecords) < gateRecordCap {
 			a.gateRecords = append(a.gateRecords, record)
 		}
+		a.gateMu.Unlock()
 		a.Logger.Debug("gate."+stage, "fields", record)
 	})
 	chain, err := appSeam.NewChain([]contracts.Gate{loggerGate})
@@ -469,11 +479,24 @@ func (a *App) Handler() http.Handler {
 	return handler
 }
 
-// GateRecords returns the metadata records the logger gate has emitted. It is
-// the observation surface tests assert on; production reads them through the
-// structured logger sink.
+// GateRecords returns a DEEP COPY of the metadata records the logger gate has
+// emitted. The copy is mandatory: the internal slice is appended to by
+// concurrent request goroutines, so returning it directly would hand the caller
+// a slice header that can be reallocated under it. Each map is copied too, since
+// a shallow slice copy would still share the inner maps and let the caller
+// mutate the internal state.
 func (a *App) GateRecords() []map[string]string {
-	return a.gateRecords
+	a.gateMu.Lock()
+	defer a.gateMu.Unlock()
+	out := make([]map[string]string, len(a.gateRecords))
+	for i, rec := range a.gateRecords {
+		clone := make(map[string]string, len(rec))
+		for k, v := range rec {
+			clone[k] = v
+		}
+		out[i] = clone
+	}
+	return out
 }
 
 // Run starts the listener and blocks until ctx is cancelled, then drains.

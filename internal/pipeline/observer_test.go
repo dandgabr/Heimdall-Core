@@ -118,3 +118,66 @@ func TestObserverBlocksOnPreCommitDecision(t *testing.T) {
 		}
 	}
 }
+
+// TestObserverHeadersAreNamesOnly pins headerNamesOnly: every key survives with a
+// nil/empty value, so a gate can see the header is present but cannot read it.
+func TestObserverHeadersAreNamesOnly(t *testing.T) {
+	var captured http.Header
+	gate := captureHeaderGate{onHeaders: func(h http.Header) { captured = h }}
+	chain, err := New([]contracts.Gate{gate})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	observer, err := NewObserver(chain)
+	if err != nil {
+		t.Fatalf("NewObserver: %v", err)
+	}
+
+	handler := observer.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Authorization", "Bearer SUPER-SECRET-TOKEN")
+	req.Header.Set("Cookie", "session=SUPER-SECRET-TOKEN")
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	if len(captured) == 0 {
+		t.Fatal("no headers reached the gate")
+	}
+	for name, vals := range captured {
+		for _, v := range vals {
+			if v != "" {
+				t.Fatalf("header %s carried a value: %q", name, v)
+			}
+		}
+	}
+	if _, ok := captured["Authorization"]; !ok {
+		t.Error("Authorization name missing")
+	}
+	if _, ok := captured["Cookie"]; !ok {
+		t.Error("Cookie name missing")
+	}
+}
+
+// captureHeaderGate records the PreRequest Headers.
+type captureHeaderGate struct {
+	onHeaders func(http.Header)
+}
+
+func (captureHeaderGate) ID() string { return "hdr" }
+func (captureHeaderGate) Stages() contracts.GateStageSet {
+	return contracts.StageSet(contracts.StagePreRequest)
+}
+func (captureHeaderGate) RequiredCaps() contracts.GateCaps       { return 0 }
+func (captureHeaderGate) FailurePolicy() contracts.FailurePolicy { return contracts.FailOpen }
+func (g captureHeaderGate) PreRequest(_ context.Context, in contracts.GateInput) (contracts.Decision, error) {
+	if g.onHeaders != nil {
+		g.onHeaders(in.Headers)
+	}
+	return contracts.Decision{Kind: contracts.DecisionContinue}, nil
+}
+func (captureHeaderGate) OnResponseChunk(context.Context, contracts.ChunkInput) (contracts.ChunkDecision, error) {
+	return contracts.ChunkDecision{Kind: contracts.ChunkPassThrough}, nil
+}
+func (captureHeaderGate) PostResponse(context.Context, contracts.GateInput) error { return nil }
+func (captureHeaderGate) Close() error                                            { return nil }
