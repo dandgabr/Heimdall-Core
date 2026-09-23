@@ -182,19 +182,32 @@ implementadores citam no código — são registradas aqui.
 | SEC-06 | [Modelo de confiança da Management API](sec-06-management-api-trust.md) | F5 | Aceita |
 | SEC-09 | [Cadeia de suprimentos e release](sec-09-supply-chain-release.md) | F6 | Aceita |
 
-### Previstas (ainda não escritas)
+### Números reservados (ainda não escritos)
 
-Mantidas aqui para reservar o número e evitar colisão. Cada uma deve existir
-**antes** de a fase correspondente começar (ver `plans/implementation-plan-v2.md`).
+Mantidos aqui para reservar o número e evitar colisão. Cada um deve existir
+**antes** da fase correspondente começar (ver `plans/implementation-plan-v2.md`).
+Os temas abaixo são decisões **hoje materializadas no código e nos contratos**
+(ex.: `config_version` e precedência em `internal/config`; refresh single-flight
+em `CredentialStore.RefreshLock`; o contrato i18n em `internal/i18n`; o subset
+OpenAI em [`../openai-compat.md`](../openai-compat.md)), mas que **ainda não têm
+arquivo de ADR** nesta pasta. Registrá-los como ADR é backlog de documentação.
 
-| Prevista | Tema | Fase |
+| Reservado | Tema | Fase |
 | --- | --- | --- |
-| 0003 | `config_version`, precedência e reload; segredos nunca por flag | F1 |
-| 0004 | Refresh single-flight (semântica do `CredentialStore.RefreshLock`) | F1 |
-| 0005 | Contrato i18n: convenção de `code`, params, fallback | F1 |
-| SEC-05 | [Política de egress / SSRF](sec-05-politica-de-egress.md) (Aceita) | F2 |
-| 0006 | Protocolo de streaming/SSE canônico | F2 |
-| 0007 | Compatibilidade OpenAI (subset explícito) | F2 |
-| 0008 | Orçamentos de timeout e retry | F2 |
+| 0004 | `config_version`, precedência, reload e segredos nunca por flag | F1 |
+| 0005 | Refresh single-flight (semântica do `CredentialStore.RefreshLock`) | F1 |
+| 0006 | Contrato i18n: convenção de `code`, params, fallback | F1 |
+| 0007 | Protocolo de streaming/SSE canônico | F2 |
+| 0008 | Compatibilidade OpenAI (subset explícito) | F2 |
+| — | Orçamentos de timeout e retry | F2 |
+| SEC-02 | Esquema de cifra/envelope (referenciado pela ADR-0002; o núcleo vive na ADR-SEC-01) | F1 |
+| SEC-08 | Reservado (não escrito) | — |
+
+### Cobertura do índice
+
+Todas as ADRs **escritas** estão listadas acima: arquitetura **0001–0003** e
+**0009–0015** (0004–0008 reservados, não escritos) e segurança **SEC-01,
+SEC-03–SEC-07 e SEC-09** (SEC-02 e SEC-08 reservados, não escritos). Esta
+página é a fonte única do índice; os arquivos vivem ao lado dela.
 
 

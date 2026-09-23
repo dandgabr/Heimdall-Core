@@ -41,7 +41,7 @@ O contrato congelado governa a integridade através de três eixos fundamentais:
 
 ## Consequências
 
-- **Impedimento de RCE:** Extensões de terceiros permanecem fora do escopo da v1 (conforme [ADR-003](decisions/adr-003-escopo-seguranca-v1.md)), garantindo integridade absoluta do runtime do roteador.
+- **Impedimento de RCE:** Extensões de terceiros permanecem fora do escopo da v1 (conforme [ADR-0003](0003-obfuscacao-provider-oauth.md), que emenda a ADR-003 de planejamento no ai-memory: `decisions/adr-003-escopo-seguranca-v1.md`), garantindo integridade absoluta do runtime do roteador.
 - **Evolução Segura para WASM:** Quando o suporte a plugins de terceiros for introduzido em fase futura, o adaptador WASM encaixar-se-á perfeitamente na interface `contracts.Gate` sem quebrar o ecossistema existente.
 - **Blindagem contra Vazamentos:** Gates comprometidos ou maliciosamente configurados não conseguem extrair credenciais de upstream nem tokens de clientes a partir do `GateInput`.
 - **Prevenção de Evasão:** Tentativas de evasão por injeção adversarial são tratadas como dados opacos e não afetam a máquina de decisão do pipeline.

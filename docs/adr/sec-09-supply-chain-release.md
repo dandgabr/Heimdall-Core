@@ -55,7 +55,30 @@ Esta ADR define a política normativa e obrigatória para a **governança de dep
    - O SBOM é gerado e arquivado como artefato oficial de release junto com os binários executáveis:
      - `heimdall-<versão>-cyclonedx.json`
      - `heimdall-<versão>-sbom.spdx.json` (opcional complementar).
-   - O arquivo do SBOM é anexado aos GitHub Releases e disponibilizado nos canais oficiais de distribuição.
+    - O arquivo do SBOM é anexado aos GitHub Releases e disponibilizado nos canais oficiais de distribuição.
+
+> **Nota de conformidade (F6.1, 2026-09-23).** O alvo `make sbom` **ainda não
+> satisfaz integralmente** os itens §2.1 e §2.2 acima. Estado medido no commit
+> `4a68b7e`, verificado na validação da F6 (`reviews/f6-validacao.md`, achados
+> F6-3/F6-4):
+>
+> - **Nome:** o alvo emite `dist/sbom.cdx.json`, e não
+>   `heimdall-<versão>-cyclonedx.json` (§2.2).
+> - **Versão:** o binário honra `VERSION`, mas `metadata.component.version` do
+>   SBOM é derivado do git pelo `cyclonedx-gomod` (`v0.0.0-<timestamp>-<sha>`) e
+>   **ignora** a flag; sem `.git`, o campo fica `null`.
+> - **Licenças:** `metadata.component.licenses` e `components[].licenses` estão
+>   ausentes (§2.1).
+> - **NPM/SPA:** o default `SBOM_TOOL=cdxgomod` cobre só módulos Go; os
+>   componentes NPM entram apenas com `SBOM_TOOL=syft` (opt-in) — §2.1 exige os
+>   da GUI.
+>
+> O **restante** da ADR-SEC-09 foi verificado como conforme: SBOM CycloneDX 1.6
+> determinístico com 18 componentes e todos os `require` do `go.mod`, manifesto
+> SHA-256, reprodutibilidade bit-a-bit, `govulncheck` sem vulnerabilidade
+> alcançável e gate de release verde. Esta nota é **documental**: a correção
+> técnica é do responsável do empacotamento e está reportada ao orquestrador.
+
 
 ---
 
@@ -143,7 +166,7 @@ Para assegurar que qualquer terceiro que compile a partir do mesmo commit obtenh
 ### 6. Isolamento e Supply Chain de Gates e Plugins
 
 1. **Reafirmação Normativa (v1):**
-   - Conforme congelado na [ADR-003](decisions/adr-003-escopo-seguranca-v1.md) e na [ADR-SEC-03](sec-03-invariante-de-gates.md), a versão v1 do Heimdall-Core **NÃO aceita gates dinâmicos nem código nativo fornecido por terceiros**.
+   - Conforme congelado na [ADR-0003](0003-obfuscacao-provider-oauth.md) (que emenda a ADR-003 de planejamento no ai-memory: `decisions/adr-003-escopo-seguranca-v1.md`) e na [ADR-SEC-03](sec-03-invariante-de-gates.md), a versão v1 do Heimdall-Core **NÃO aceita gates dinâmicos nem código nativo fornecido por terceiros**.
    - Todos os gates ativos em v1 são módulos nativos built-in, auditados, empacotados e compilados estaticamente dentro da base oficial de código (`internal/gates/`).
 2. **Requisitos de Supply Chain para Evolução Futura (WASM pós-v1):**
    Quando o suporte a gates de terceiros for introduzido em versões futuras pós-v1:
@@ -164,6 +187,19 @@ A aprovação formal e o encerramento da Fase F6 exigem a verificação direta d
 5. **Manifesto de Checksums (`checksums.txt`):** Disponível contendo os hashes SHA-256 de todos os binários e artefatos de release.
 6. **Assinatura Cosign ou SLSA Provenance Válida:** O manifesto de checksums e/ou binários possuem assinatura verificável via `cosign` ou atestação de proveniência de build SLSA no GitHub Actions.
 7. **Documentação de Verificação Pública:** O README contém a seção "Verificação de Integridade e Assinatura", demonstrando o comando exato para validação pelo operador.
+
+> **Estado dos critérios em F6.1 (medido em `4a68b7e`).** Conforme:
+> §7.1 (`govulncheck` 0 alcançáveis), §7.2 (`statically linked` nas duas
+> arquiteturas), §7.3 (reprodutibilidade bit-a-bit), §7.5 (manifesto SHA-256
+> presente e conferido — o alvo o nomeia `dist/SHA256SUMS`; o §3.1 ilustra
+> `checksums.txt`, diferença de nome sem efeito de conteúdo), §7.6 (fallback SLSA
+> documentado; cosign pendente em ambiente offline — D-SEC-09-01) e §7.7 (seção
+> "Verificação de Integridade e Assinatura" presente no README).
+> Parcialmente conforme: §7.4 — o SBOM é gerado válido e cobre todos os
+> `require`, mas o nome é `dist/sbom.cdx.json` em vez de
+> `heimdall-<versão>-cyclonedx.json`, e faltam versão/licenças/NPM (ver a nota de
+> conformidade no §2). A divergência de nome de §7.4 é do alvo do Makefile e
+> está reportada ao responsável do empacotamento.
 
 ## Consequências
 
