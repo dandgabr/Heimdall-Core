@@ -343,6 +343,32 @@ func (f *PKCEFlow) AwaitCallback(ctx context.Context, ch contracts.AuthChallenge
 	return f.exchange(ctx, ch, code, desc)
 }
 
+// ExchangeCode completes the grant with a MANUALLY supplied authorization code —
+// the paste-code fallback for a browser that cannot reach the loopback listener
+// (a remote/headless session, a hardened sandbox). The challenge must be the
+// one Begin produced: the code is exchanged with its PKCE verifier and its
+// redirect_uri, and Google only accepts a code presented with the exact
+// redirect_uri it was issued for.
+//
+// The callback listener Begin bound is NOT consumed by this path; the caller
+// releases it with Close.
+func (f *PKCEFlow) ExchangeCode(ctx context.Context, ch contracts.AuthChallenge, code string, desc contracts.ProviderDescriptor) (contracts.AuthResult, error) {
+	if ch.State == "" || ch.PKCEVerifier.IsEmpty() || ch.RedirectURI == "" {
+		return contracts.AuthResult{}, domain.New(domain.CodeAuthFlowInsecure,
+			domain.WithHTTPStatus(500),
+			domain.WithParams(map[string]string{"reason": "challenge lacks state, verifier or redirect uri"}),
+		)
+	}
+	if code == "" {
+		return contracts.AuthResult{}, domain.New(domain.CodeAuthStateMismatch,
+			domain.WithHTTPStatus(400),
+			domain.WithScope(domain.ScopeRequest),
+			domain.WithParams(map[string]string{"reason": "no authorization code supplied"}),
+		)
+	}
+	return f.exchange(ctx, ch, code, desc)
+}
+
 // exchange trades the authorization code for tokens using the PKCE verifier.
 func (f *PKCEFlow) exchange(ctx context.Context, ch contracts.AuthChallenge, code string, desc contracts.ProviderDescriptor) (contracts.AuthResult, error) {
 	clientID := desc.ClientID

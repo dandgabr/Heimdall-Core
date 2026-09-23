@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -113,7 +114,7 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.AddCommand(newServeCmd(), newVersionCmd(), newTokenCmd(), newClientKeyCmd(), newProviderCmd(), newComboCmd(), newQuotaCmd(), newGateCmd(), newConfigCmd())
+	root.AddCommand(newServeCmd(), newVersionCmd(), newTokenCmd(), newClientKeyCmd(), newProviderCmd(), newLoginCmd(), newComboCmd(), newQuotaCmd(), newGateCmd(), newConfigCmd())
 	return root
 }
 
@@ -352,6 +353,113 @@ func newClientKeyRevokeCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&configPath, "config", "", "path to the TOML configuration file")
 	return cmd
+}
+
+// newLoginCmd implements `heimdall login <provider-id>` (BD-02): the
+// interactive OAuth login for OAuth providers (Antigravity) and the typed
+// refusal pointing at `provider add-key` for API-key providers. The
+// authorization URL is printed for the browser; the grant completes either on
+// the ephemeral loopback callback or, with --code, from a pasted authorization
+// code (a browser that cannot reach 127.0.0.1). `--status` reports the stored
+// login without ever opening the sealed credential.
+//
+// No token ever reaches the output: the persisted credential is sealed in the
+// vault and the printed result line carries identity metadata only.
+func newLoginCmd() *cobra.Command {
+	var (
+		configPath string
+		code       string
+		status     bool
+	)
+	cmd := &cobra.Command{
+		Use:   "login <provider-id>",
+		Short: "Authenticate a provider (OAuth login; API-key providers use `provider add-key`)",
+		Long: "Run the interactive OAuth login for an OAuth provider:\n\n" +
+			"    heimdall login antigravity\n\n" +
+			"The authorization URL is printed; opening it completes the grant on a\n" +
+			"local loopback callback. When the browser cannot reach 127.0.0.1\n" +
+			"(headless/remote session), paste the code from the redirect URL:\n\n" +
+			"    heimdall login antigravity --code <authorization-code>\n\n" +
+			"The client secret, when the provider requires one, comes from the\n" +
+			"provider's config (client_secret / client_secret_env) — it is never\n" +
+			"prompted, printed or logged. The stored tokens are sealed in the vault.\n" +
+			"Inspect the stored login with `heimdall login --status <provider-id>`.\n" +
+			"API-key providers do not log in: use `heimdall provider add-key`.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			instance, err := buildReadOnly(configPath)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = instance.Close() }()
+
+			id := domain.ProviderID(args[0])
+			if status {
+				st, err := instance.LoginStatus(cmd.Context(), id)
+				if err != nil {
+					return err
+				}
+				return renderLoginStatus(cmd.OutOrStdout(), st)
+			}
+
+			session, err := instance.BeginLogin(cmd.Context(), id)
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			lang := cliLanguage(instance.Bundle)
+			// The ToS risk notice (ADR-0003 §4) precedes everything: login is
+			// the moment the subscription session is connected.
+			if notice := session.RiskNotice(); notice != "" {
+				if _, err := fmt.Fprintf(out, "  ! %s\n", instance.Bundle.Format(lang, notice, nil)); err != nil {
+					return err
+				}
+			}
+			if _, err := fmt.Fprintln(out, instance.Bundle.Format(lang, domain.CodeCLILoginOpenURL,
+				map[string]string{"provider": string(id), "url": session.AuthURL()})); err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintln(out, instance.Bundle.Format(lang, domain.CodeCLILoginCodeHint, nil)); err != nil {
+				return err
+			}
+			res, err := session.Complete(cmd.Context(), code)
+			if err != nil {
+				return err
+			}
+			// Identity metadata only — never a token.
+			_, err = fmt.Fprintf(out, "%s\tprovider=%s\tlabel=%s\temail=%s\tproject=%s\tplan=%s\n",
+				res.CredentialID, res.Provider, res.Label, res.Email, res.Project, res.Plan)
+			return err
+		},
+	}
+	cmd.Flags().StringVar(&configPath, "config", "", "path to the TOML configuration file")
+	cmd.Flags().StringVar(&code, "code", "", "paste the authorization code instead of waiting for the local callback")
+	cmd.Flags().BoolVar(&status, "status", false, "show the stored login state (no secrets)")
+	return cmd
+}
+
+// renderLoginStatus prints `login --status` as key=value data lines: the
+// logged-in view carries identity metadata and the access-token expiry, the
+// logged-out view the readiness reason code. No secret field exists here.
+func renderLoginStatus(out io.Writer, st app.LoginStatus) error {
+	if !st.LoggedIn {
+		reason := st.ReasonCode
+		if reason == "" {
+			reason = "logged-out"
+		}
+		_, err := fmt.Fprintf(out, "%s\tstate=logged-out\treason=%s\n", st.Provider, reason)
+		return err
+	}
+	expires, state := "unknown", "valid"
+	if !st.ExpiresAt.IsZero() {
+		expires = st.ExpiresAt.UTC().Format(time.RFC3339)
+		if st.Expired {
+			state = "expired"
+		}
+	}
+	_, err := fmt.Fprintf(out, "%s\tcredential=%s\tlabel=%s\temail=%s\tproject=%s\tplan=%s\texpires=%s\tstate=%s\n",
+		st.Provider, st.CredentialID, st.Label, st.Email, st.Project, st.Plan, expires, state)
+	return err
 }
 
 // newProviderCmd groups the read/management provider commands. None of them// performs network I/O: `list` and `status` only inspect the registry and the

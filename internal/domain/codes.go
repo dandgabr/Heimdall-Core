@@ -110,6 +110,11 @@ const (
 	// CodeProviderAPIKeyReadFailed is returned when `provider add-key` cannot
 	// read the key from stdin/the terminal.
 	CodeProviderAPIKeyReadFailed = "provider.api_key_read_failed"
+	// CodeProviderLoginNotSupported is returned when an interactive OAuth
+	// login is requested for a provider whose auth mode is a static API key
+	// (the mirror of provider.api_key_not_supported): the actionable fix is
+	// `provider add-key`, not a browser grant. Carries {provider}.
+	CodeProviderLoginNotSupported = "provider.login_not_supported"
 
 	// translate.* — the pure translator layer (F2.3). A malformed payload or an
 	// unmappable shape fails with translate.failed; a lookup for a (from,to)
@@ -249,4 +254,9 @@ const (
 	CodeCLIGateNotEnabled = "cli.gate.not_enabled"
 	CodeCLIGateConfigOnly = "cli.gate.config_only"
 	CodeCLIConfigNoFile   = "cli.config.no_file"
+	// cli.login.* — the `heimdall login` messages (BD-02). The authorization
+	// URL is {url} data interpolated into the template. None of them ever
+	// carries a token or the client secret.
+	CodeCLILoginOpenURL  = "cli.login.open_url"
+	CodeCLILoginCodeHint = "cli.login.code_hint"
 )

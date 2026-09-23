@@ -370,10 +370,11 @@ func TestProviderReadinessEmptyVault(t *testing.T) {
 	a := buildProviderApp(t, "https://x/v1") // vault has Secrets but no credential
 	status := readyByID(a.ProviderStatus(context.Background()))
 
-	// Antigravity is a FUTURE expansion: provider.future, not a user-fixable
-	// block (distinct from pending endpoints and from a missing credential).
-	if s := status["antigravity"]; s.Ready || !s.Future || s.ReasonCode != domain.CodeProviderFuture {
-		t.Errorf("antigravity = %+v, want future(provider.future)", s)
+	// Antigravity is OAuth with a configured client secret, so the flow builds
+	// and the missing piece is the credential: blocked(provider.login_required),
+	// the user-fixable state `heimdall login` resolves (BD-02).
+	if s := status["antigravity"]; s.Ready || s.Future || s.ReasonCode != domain.CodeProviderLoginRequired {
+		t.Errorf("antigravity = %+v, want blocked(provider.login_required)", s)
 	}
 	// API-key without credential -> provider.no_credential.
 	for _, id := range []domain.ProviderID{"z.ai", "ollama-cloud", "command-code"} {
@@ -388,8 +389,8 @@ func TestProviderReadinessEmptyVault(t *testing.T) {
 			t.Errorf("provider list reported %s ready with an empty vault", p.ID)
 		}
 		if p.ID == "antigravity" {
-			if !p.Future || p.ReasonCode != domain.CodeProviderFuture {
-				t.Errorf("list antigravity = %+v, want future", p)
+			if p.Future || p.ReasonCode != domain.CodeProviderLoginRequired {
+				t.Errorf("list antigravity = %+v, want blocked(login_required)", p)
 			}
 		} else if p.Future {
 			t.Errorf("list %s unexpectedly Future", p.ID)
@@ -421,25 +422,10 @@ func TestProviderReadinessAPIKeyWithCredential(t *testing.T) {
 	}
 }
 
-// nonFutureDescriptor returns the real Antigravity descriptor with Future
-// cleared, so the OAuth readiness branches (login_required / ready) stay
-// testable even now that the real descriptor is Future.
-func nonFutureDescriptor() func(domain.ProviderID) (contracts.ProviderDescriptor, error) {
-	return func(id domain.ProviderID) (contracts.ProviderDescriptor, error) {
-		desc, err := auth.Descriptor(id)
-		if err != nil {
-			return desc, err
-		}
-		desc.Future = false
-		desc.FutureNote = ""
-		return desc, nil
-	}
-}
-
-// (c) OAuth (future marker cleared) with a synthetic credential -> ready.
+// (c) OAuth with a stored credential -> ready (BD-02: the descriptor is no
+// longer Future, so readiness is purely credential-driven).
 func TestProviderReadinessOAuthWithCredential(t *testing.T) {
 	a := buildProviderApp(t, "https://x/v1")
-	a.descriptor = nonFutureDescriptor()
 	seedCredentialFor(t, a, "antigravity", "ag", contracts.AuthOAuth, "oauth-blob")
 	status := readyByID(a.ProviderStatus(context.Background()))
 	if s := status["antigravity"]; !s.Ready || s.Future || s.ReasonCode != "" {
@@ -447,11 +433,10 @@ func TestProviderReadinessOAuthWithCredential(t *testing.T) {
 	}
 }
 
-// (d) OAuth (future marker cleared) without a credential ->
-// blocked(provider.login_required), even though the endpoints are configured.
+// (d) OAuth without a credential -> blocked(provider.login_required), even
+// though the endpoints are configured and the flow builds.
 func TestProviderReadinessOAuthWithoutCredential(t *testing.T) {
 	a := buildProviderApp(t, "https://x/v1")
-	a.descriptor = nonFutureDescriptor()
 	status := readyByID(a.ProviderStatus(context.Background()))
 	s := status["antigravity"]
 	if s.Ready {
@@ -501,37 +486,44 @@ func TestDomainErrorCode(t *testing.T) {
 	}
 }
 
-// --- Future provider (Part A) ---
+// --- Antigravity live state (BD-02) ---
 
-// TestProviderFutureState proves Antigravity is reported as a planned expansion
-// (future + provider.future), remains listed, and is never a user-fixable block.
-func TestProviderFutureState(t *testing.T) {
-	a := buildProviderApp(t, "https://x/v1")
+// TestAntigravityLoginReadyState proves Antigravity left the `future` state:
+// the descriptor no longer carries the marker, the provider stays listed with
+// its ToS risk notice, and its readiness is credential-driven — without a
+// stored credential it is blocked(provider.login_required), the state
+// `heimdall login` resolves.
+func TestAntigravityLoginReadyState(t *testing.T) {
+	a := buildProviderApp(t, "https://x/v1") // secret injected, empty vault
 
-	// Descriptor fact: registered, complete, and marked future.
+	// Descriptor fact: registered, complete, and NOT future anymore.
 	desc, err := auth.Descriptor("antigravity")
 	if err != nil {
 		t.Fatalf("Descriptor: %v", err)
 	}
-	if !desc.Future || desc.FutureNote == "" {
-		t.Fatalf("antigravity descriptor not marked future: %+v", desc)
+	if desc.Future || desc.FutureNote != "" {
+		t.Fatalf("antigravity descriptor still marked future: %+v", desc)
 	}
-	if desc.AuthEndpoint == "" || desc.ClientID == "" || !desc.IsObfuscated() {
-		t.Fatal("future marker must not strip the descriptor's capabilities")
+	if desc.AuthEndpoint == "" || desc.ClientID == "" || !desc.IsObfuscated() || !desc.RequiresClientSecret {
+		t.Fatal("removing the future marker must not strip the descriptor's capabilities")
 	}
 
-	// It is listed (catalog completeness) with the future state.
+	// Listed (catalog completeness) with the user-fixable blocked state and the
+	// risk notice.
 	var listed bool
 	for _, p := range a.ProviderList(context.Background()) {
 		if p.ID != "antigravity" {
 			continue
 		}
 		listed = true
-		if !p.Future || p.Ready {
-			t.Errorf("list antigravity = %+v, want future and not ready", p)
+		if p.Future || p.Ready {
+			t.Errorf("list antigravity = %+v, want neither future nor ready (empty vault)", p)
 		}
-		if p.ReasonCode != domain.CodeProviderFuture {
+		if p.ReasonCode != domain.CodeProviderLoginRequired {
 			t.Errorf("list antigravity reason = %q", p.ReasonCode)
+		}
+		if p.RiskNotice != "provider.risk_notice.antigravity" {
+			t.Errorf("list antigravity risk notice = %q", p.RiskNotice)
 		}
 	}
 	if !listed {
@@ -543,11 +535,11 @@ func TestProviderFutureState(t *testing.T) {
 		if s.ID != "antigravity" {
 			continue
 		}
-		if !s.Future || s.Ready || s.ReasonCode != domain.CodeProviderFuture {
-			t.Errorf("status antigravity = %+v, want future(provider.future)", s)
+		if s.Future || s.Ready || s.ReasonCode != domain.CodeProviderLoginRequired {
+			t.Errorf("status antigravity = %+v, want blocked(provider.login_required)", s)
 		}
-		if s.Reason == "" {
-			t.Error("future status has no reason note")
+		if s.RiskNotice == "" {
+			t.Error("status antigravity lost the risk notice")
 		}
 	}
 }

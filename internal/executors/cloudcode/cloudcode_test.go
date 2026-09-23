@@ -48,8 +48,12 @@ func testDeps(doer contracts.HTTPDoer) contracts.ExecutorDeps {
 		Clock:    fakeClock{t: time.Unix(1000, 0)},
 		IDs:      fakeIDs{},
 		Redactor: fakeRedactor{},
-		Secrets:  openerFunc(func(string) ([]byte, error) { return []byte("token-xyz"), nil }),
-		Egress:   fakeEgress{doer: doer},
+		// OAuth credentials seal a contracts.CredentialBlob document; the
+		// executor reads only the access token out of it.
+		Secrets: openerFunc(func(string) ([]byte, error) {
+			return []byte(`{"access_token":"token-xyz","refresh_token":"refresh-xyz"}`), nil
+		}),
+		Egress: fakeEgress{doer: doer},
 	}
 }
 
@@ -511,7 +515,9 @@ func loopbackExecutor(t *testing.T, srv *httptest.Server, idle time.Duration) *E
 	t.Helper()
 	deps := testDeps(nil)
 	deps.Egress = egress.New()
-	deps.Secrets = openerFunc(func(string) ([]byte, error) { return []byte("token-xyz"), nil })
+	deps.Secrets = openerFunc(func(string) ([]byte, error) {
+		return []byte(`{"access_token":"token-xyz"}`), nil
+	})
 	e, err := New(Config{
 		Family: "antigravity", BaseURL: srv.URL, AllowLoopback: true,
 		IdleTimeout: idle, Descriptor: antigravityDescriptor(),

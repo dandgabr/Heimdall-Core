@@ -22,13 +22,11 @@ const (
 // endpoints, so their descriptors are complete: only the family identity and
 // auth mode matter.
 //
-// Antigravity is the only OAuth provider. Its authorization/token/device
-// endpoints were NOT verified against the live service in this task, and the
-// brief forbids inventing them. They are therefore declared with the canonical
-// Google OAuth placeholder host and marked `TODO(confirm)` below. The FLOW is
-// fully tested against an httptest.Server; only the literal URLs are pending
-// confirmation by the provider owner before the family is enabled against the
-// real service.
+// Antigravity is the only OAuth provider. Its authorization/token endpoints
+// and the public CLI client were confirmed against the reference connector
+// (registry/antigravity.js) and the installed `agy` binary (ADR-0003 context),
+// so PendingEndpoints is empty and the provider participates in readiness like
+// any other: credential present -> ready, absent -> blocked(login_required).
 func Descriptors() map[domain.ProviderID]contracts.ProviderDescriptor {
 	return map[domain.ProviderID]contracts.ProviderDescriptor{
 		ProviderAntigravity: {
@@ -61,12 +59,13 @@ func Descriptors() map[domain.ProviderID]contracts.ProviderDescriptor {
 			RequiresClientSecret: true,
 			Obfuscation:          antigravityObfuscation(),
 			RiskNotice:           "provider.risk_notice.antigravity",
-			// Antigravity is a planned EXPANSION, not a user-fixable block: the
-			// descriptor is complete, but the OAuth login surface and the router
-			// wiring are not shipped yet. It stays registered (it appears in the
-			// catalog) with the provider.future state.
-			Future:     true,
-			FutureNote: "cloudcode connector; requires OAuth login and router wiring — planned",
+			// BD-02: the interactive login surface (`heimdall login`) and the
+			// vault persistence ship with this descriptor, so it is no longer
+			// Future. Readiness is credential-driven: without a stored
+			// credential the provider is blocked(provider.login_required)
+			// (fixable by the user); with one it is ready. The client SECRET
+			// stays operator-supplied (see RequiresClientSecret above) and a
+			// login without it fails closed.
 		},
 		ProviderZAI: {
 			ID:          ProviderZAI,

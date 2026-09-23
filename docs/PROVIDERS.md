@@ -22,18 +22,21 @@ Os quatro provedores registrados vivem em `internal/auth/descriptors.go`
 | `z.ai` | `openai` | `api_key` | `NewAPIKeyFlow` | declarados por config | Utilizável |
 | `ollama-cloud` | `openai` | `api_key` | `NewAPIKeyFlow` | declarados por config | Utilizável |
 | `command-code` | `openai` | `api_key` | `NewAPIKeyFlow` | declarados por config | Utilizável |
-| `antigravity` | `cloudcode` | `oauth` | `NewAntigravityFlow` | declarados por config | **`future`** — sem login/wiring |
+| `antigravity` | `cloudcode` | `oauth` | `NewAntigravityFlow` | declarados por config | Utilizável (login OAuth; ver abaixo) |
 
 Notas de fidelidade ao código:
 
-- **Antigravity** é `Future: true` com `FutureNote` "cloudcode connector;
-  requires OAuth login and router wiring — planned". Ele tem os endpoints, o
-  client público do CLI, a ocultação e o `RiskNotice` declarados; o conector
-  CloudCode existe e é testado com `httptest`, mas não há superfície de login
-  interativo nem wiring no Router. O estado reportado é `provider.future`, não
-  um "blocked" corrigível pelo usuário.
+- **Antigravity** saiu do estado `future` no BD-02: há superfície de login
+  interativa (`heimdall login`), persistência selada da credencial no cofre e
+  refresh com single-flight. O estado reportado é dirigido pela credencial:
+  `ready` com credencial no cofre, `blocked(provider.login_required)` sem, e
+  `blocked(auth.provider_client_secret_missing)` quando o operador ainda não
+  forneceu o segredo de cliente pela config. O `RiskNotice` de ToS continua
+  obrigatório e exibido na listagem e no login.
 - **`PendingEndpoints()` está vazio.** Nenhum provedor tem endpoint placeholder;
-  Antigravity é `future` por *feature*, não por endpoint não confirmado.
+  os endpoints do Antigravity foram confirmados (ADR-0003), então a ausência de
+  credencial é reportada como `blocked(provider.login_required)`, não como
+  pendência de endpoint.
 - Os três provedores de API key **não têm `base_url` embutida**: ela vem do
   bloco `[[providers]]` da config. Sem `base_url`, a família registra e é
   listável, mas `BuildExecutor` recusa (um executor sem destino não roda).
@@ -146,9 +149,51 @@ Regras:
 - **`config show` redige** `providers.<i>.client_secret` (mostra `[REDACTED]`);
   o `client_secret_env` (nome da variável) é exibido, pois não é segredo. O
   valor nunca aparece em log.
-- **Sem segredo → falha fechada**: `heimdall login` (próxima fase) e qualquer uso
-  do fluxo falham com `auth.provider_client_secret_missing`, nunca com um
-  placeholder.
+- **Sem segredo → falha fechada**: `heimdall login` e qualquer uso do fluxo
+  falham com `auth.provider_client_secret_missing`, nunca com um placeholder.
+
+### Login Antigravity (`heimdall login`)
+
+Com o segredo de cliente resolvido (config/env), o login roda o fluxo
+`authorization_code` completo — exchange, userinfo, `loadCodeAssist` (descoberta
+de projeto/tier), onboarding em background — e persiste a credencial **selada**
+no cofre:
+
+```sh
+heimdall login antigravity
+# Abra esta URL no navegador para autorizar o antigravity: ...
+# Aguardando o callback OAuth em 127.0.0.1:<porta efêmera> ...
+# oauth-antigravity-<id>  provider=antigravity  label=<email>  email=...  project=...  plan=...
+```
+
+- **Callback loopback**: o `Begin` vincula um listener em `127.0.0.1` em porta
+  efêmera e a `redirect_uri` anunciada carrega essa porta (validada contra a
+  allowlist do descriptor; state de 256 bits de uso único; PKCE S256).
+- **Fallback de código colado** (sessão headless/remota, sem acesso ao
+  `127.0.0.1`): copie o `code` da URL de redirecionamento e rode
+  `heimdall login antigravity --code <code>`. O caminho faz o mesmo exchange
+  (client secret + verifier + `redirect_uri` da porta vinculada) e o mesmo
+  post-exchange.
+- **Estado armazenado**: o blob selado (`enc:v1`) é um documento JSON
+  `{"access_token","refresh_token"}` — o refresh token **nunca** existe fora do
+  ciphertext; os metadados não secretos (`email`, subject, `project`
+  (`cloudaicompanionProject`), `plan` (tier)) vão em `Meta`. O executor CloudCode
+  abre o blob e apresenta o access token como Bearer.
+- **`--status`**:
+  `heimdall login --status antigravity` reporta a credencial sem segredo
+  (id, label, email, project, plan, expiração, `state=valid|expired`) ou
+  `state=logged-out reason=provider.login_required`.
+- **Refresh**: o access token se renova com o refresh token do blob, sob o
+  lock de single-flight do `CredentialStore` (`N` chamadas simultâneas → exatamente
+  um exchange upstream), com o client secret da config e o `projectId`/tier
+  reaproveitados de `Meta`. Um refresh token rotacionado substitui o anterior;
+  um blob corrupto ou refresh token revogado falha com
+  `auth.credential_invalid` (novo login), nunca com token vazio.
+- **RISK_NOTICE (ADR-0003 §4)**: o `heimdall login antigravity` exibe o aviso
+  de ToS antes da autorização — usar a sessão de assinatura como proxy pode
+  causar **suspensão ou banimento** da conta; risco aceito pelo dono do projeto.
+- Provedores de API key não fazem login: `heimdall login z.ai` falha com
+  `provider.login_not_supported` apontando para `provider add-key`.
 
 
 ### 2. Ocultação por provedor (`Obfuscation`)
@@ -205,12 +250,17 @@ utilizável.
 (`providerReadiness`), então não podem divergir:
 
 - **`future`** — a feature não está entregue; não é corrigível pelo usuário
-  (`provider.future`).
+  (`provider.future`). Hoje nenhum provedor cai aqui (o Antigravity saiu desse
+  estado no BD-02); a categoria permanece na taxonomia.
+- **`blocked(auth.provider_client_secret_missing)`** — fluxo OAuth sem
+  o segredo de cliente do operador. Correção: config/env (ver "Segredo de
+  cliente OAuth").
 - **`blocked(auth.provider_pending_endpoints)`** — endpoint placeholder. Hoje
   nenhum provedor cai aqui.
 - **`blocked(provider.login_required)`** — provedor OAuth sem credencial no
-  cofre.
+  cofre. Correção: `heimdall login <id>`.
 - **`blocked(provider.no_credential)`** — provedor de API key sem chave.
+  Correção: `heimdall provider add-key`.
 - **`blocked(credential.invalid_auth_mode)`** — credencial com modo que a
   família não suporta.
 - **`ready`** — há uma credencial utilizável cujo modo a família aceita.

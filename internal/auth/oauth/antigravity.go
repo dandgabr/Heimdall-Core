@@ -103,6 +103,17 @@ func (f *AntigravityFlow) AwaitCallback(ctx context.Context, ch contracts.AuthCh
 	return f.postExchange(ctx, res)
 }
 
+// ExchangeCode completes the grant from a manually pasted authorization code
+// (the paste-code fallback) and runs the same Antigravity post-exchange as the
+// callback path, so both entry points produce the identical enriched result.
+func (f *AntigravityFlow) ExchangeCode(ctx context.Context, ch contracts.AuthChallenge, code string, desc contracts.ProviderDescriptor) (contracts.AuthResult, error) {
+	res, err := f.PKCEFlow.ExchangeCode(ctx, ch, code, desc)
+	if err != nil {
+		return contracts.AuthResult{}, err
+	}
+	return f.postExchange(ctx, res)
+}
+
 // postExchange runs the Antigravity-specific steps after the token grant:
 //  1. userinfo  -> Account.Email / Account.Subject;
 //  2. loadCodeAssist -> Account.Project (cloudaicompanionProject) and tier;

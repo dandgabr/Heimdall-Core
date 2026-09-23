@@ -69,6 +69,20 @@ func TestOpenCredentialBranches(t *testing.T) {
 		t.Fatalf("open failure err = %v", err)
 	}
 
+	// A malformed OAuth document (the blob must be a contracts.CredentialBlob).
+	badBlob := deps
+	badBlob.Secrets = openerFunc(func(string) ([]byte, error) { return []byte("not json"), nil })
+	if _, err := openCredential(badBlob, oauthCred()); !hasCode(err, domain.CodeAuthSecretMissing) {
+		t.Fatalf("malformed blob err = %v", err)
+	}
+
+	// An API-key credential opens to the raw plaintext.
+	rawKey := deps
+	rawKey.Secrets = openerFunc(func(string) ([]byte, error) { return []byte("raw-key"), nil })
+	if s, err := openCredential(rawKey, contracts.Credential{AuthMode: contracts.AuthAPIKey, Sealed: []byte("enc:v1:x")}); err != nil || s != "raw-key" {
+		t.Fatalf("api key open = %q, %v", s, err)
+	}
+
 	// Unknown mode.
 	if _, err := openCredential(deps, contracts.Credential{AuthMode: contracts.AuthMode(99)}); !hasCode(err, domain.CodeCredentialInvalidAuthMode) {
 		t.Fatalf("unknown mode err = %v", err)

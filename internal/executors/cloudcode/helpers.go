@@ -31,8 +31,11 @@ var jsonMarshal = json.Marshal
 var errIdleTimeout = errors.New("cloudcode: sse stream idle timeout")
 
 // openCredential resolves the credential's secret. AuthNone returns empty;
-// AuthAPIKey/AuthOAuth require Secrets and a non-empty sealed blob. The sealed
-// blob is opened by the SecretStore; a failure is fail-closed.
+// AuthAPIKey opens the sealed blob as the raw key; AuthOAuth opens a
+// contracts.CredentialBlob JSON document and yields its access token (the
+// refresh token stays inside the ciphertext, never crosses this boundary).
+// Secrets and a non-empty sealed blob are required for both; every failure is
+// fail-closed.
 func openCredential(deps contracts.ExecutorDeps, cred contracts.Credential) (string, error) {
 	switch cred.AuthMode {
 	case contracts.AuthNone:
@@ -51,7 +54,19 @@ func openCredential(deps contracts.ExecutorDeps, cred contracts.Credential) (str
 				domain.WithScope(domain.ScopeCredential),
 			)
 		}
-		return string(plaintext), nil
+		if cred.AuthMode == contracts.AuthAPIKey {
+			return string(plaintext), nil
+		}
+		blob, err := contracts.ParseCredentialBlob(plaintext)
+		if err != nil {
+			return "", domain.New(domain.CodeAuthSecretMissing,
+				domain.WithHTTPStatus(http.StatusInternalServerError),
+				domain.WithScope(domain.ScopeCredential),
+				domain.WithCause(err),
+				domain.WithParams(map[string]string{"reason": "the stored oauth credential is malformed; log in again"}),
+			)
+		}
+		return blob.AccessToken, nil
 	default:
 		// A stored credential with an unknown mode: credential.invalid_auth_mode
 		// is the right code, but its message expects {id, mode}.
