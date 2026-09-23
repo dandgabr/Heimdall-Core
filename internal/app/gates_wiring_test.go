@@ -311,6 +311,53 @@ func TestGateRateLimitThroughGateway(t *testing.T) {
 	}
 }
 
+// TestInferenceRateLimitDoesNotThrottleManagement is the F5-2 integration: with
+// the inference rate-limit configured (rate=1/min), exhausting it on /v1/* must
+// NOT throttle health, the Management API or /v1/models-like read paths outside
+// the observer's scope, and the gateway's own 429 must carry Retry-After + the
+// i18n envelope.
+func TestInferenceRateLimitDoesNotThrottleManagement(t *testing.T) {
+	a, _ := wireTestApp(t, func(c *config.Config) {
+		c.Features.Gates.Security = true
+		c.Features.Gates.SecurityParams.RateLimit = config.RateLimitConfig{Rate: 1, Interval: time.Minute}
+	})
+	// Exhaust the inference bucket (the first passes, the second is 429).
+	_ = chatRequestPOST(t, a, `{"model":"no-such-model","messages":[]}`)
+	second := chatRequestPOST(t, a, `{"model":"no-such-model","messages":[]}`)
+	if second.Code != http.StatusTooManyRequests {
+		t.Fatalf("second inference request = %d, want 429", second.Code)
+	}
+	if second.Header().Get("Retry-After") == "" {
+		t.Fatal("inference 429 missing Retry-After")
+	}
+	if !strings.Contains(second.Body.String(), "security.rate_limited") {
+		t.Fatalf("inference 429 body = %s, want the i18n envelope", second.Body.String())
+	}
+
+	// Management and health are NOT in the observer's scope: they stay 200 even
+	// with the inference bucket exhausted.
+	token := readTokenFile(t, a)
+	for _, tc := range []struct {
+		path, auth string
+	}{
+		{"/health", ""},
+		{"/api/mgmt/ping", "Bearer " + token},
+		{"/api/mgmt/status", "Bearer " + token},
+	} {
+		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+		req.RemoteAddr = "127.0.0.1:1234"
+		req.Host = "127.0.0.1"
+		if tc.auth != "" {
+			req.Header.Set("Authorization", tc.auth)
+		}
+		rec := httptest.NewRecorder()
+		a.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s = %d, want 200 (inference throttle must not leak)", tc.path, rec.Code)
+		}
+	}
+}
+
 // TestMemoryWriterWiredThroughChainPostResponse proves the wiring built the
 // REAL memory store behind the gates: a PostResponse carrying a client key
 // stores a redacted memory under the derived namespace once the owned sink

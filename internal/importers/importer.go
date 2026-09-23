@@ -286,12 +286,21 @@ func (im *Importer) env(name string) string {
 // injected environment (a systemd --user service may run with a different HOME
 // than the interactive shell, and tests need it isolated); then the process
 // user's home. Never guessing means the read-only source path is deterministic.
+//
+// Hermeticity (F5-1): when an environment snapshot was INJECTED (Env != nil),
+// it is the complete picture — an absent HOME means "unknown", never a silent
+// fall back to the host operator's real home. Only a nil Env (no snapshot) uses
+// os.UserHomeDir. This stops a test that runs with an empty env from reading the
+// host's real harness files.
 func (im *Importer) home() string {
 	if im.Home != "" {
 		return im.Home
 	}
-	if h := im.env("HOME"); h != "" {
-		return h
+	if im.Env != nil {
+		if h := im.Env["HOME"]; h != "" {
+			return h
+		}
+		return "."
 	}
 	if h, err := os.UserHomeDir(); err == nil {
 		return h

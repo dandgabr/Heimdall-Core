@@ -152,3 +152,27 @@ func TestKeyFileMissing(t *testing.T) {
 		}
 	})
 }
+
+// TestDefaultKeyFilePathForIsHermetic is the F5-1 regression guard: resolving
+// the key path from an INJECTED environment must never consult the process
+// environment (or the host's real home), so a test that injects an isolated
+// env cannot see the operator's real ~/.local/share/heimdall/master-key.
+func TestDefaultKeyFilePathForIsHermetic(t *testing.T) {
+	// The process environment points somewhere with a marker.
+	t.Setenv("XDG_DATA_HOME", "/host/xdg")
+	t.Setenv("HOME", "/host/home")
+
+	// An injected env with its own XDG_DATA_HOME wins over the process env.
+	if got := DefaultKeyFilePathFor(map[string]string{"XDG_DATA_HOME": "/injected/xdg"}); got != "/injected/xdg/heimdall/master-key" {
+		t.Errorf("injected XDG_DATA_HOME = %q", got)
+	}
+	// An injected env with only HOME derives from that home, NOT the process one.
+	if got := DefaultKeyFilePathFor(map[string]string{"HOME": "/injected/home"}); got != "/injected/home/.local/share/heimdall/master-key" {
+		t.Errorf("injected HOME = %q", got)
+	}
+	// An EMPTY (non-nil) env means "no variables": it must not fall back to the
+	// process environment, so it yields the bare fallback, never the host path.
+	if got := DefaultKeyFilePathFor(map[string]string{}); got != "master-key" {
+		t.Errorf("empty injected env = %q, want master-key (hermetic)", got)
+	}
+}

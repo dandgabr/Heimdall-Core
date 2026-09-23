@@ -46,11 +46,28 @@ type Options struct {
 
 // Load resolves, upgrades and validates the configuration.
 func Load(opts Options) (Config, error) {
+	cfg, _, err := load(opts)
+	return cfg, err
+}
+
+// LoadWithSources resolves the configuration AND returns the per-key provenance.
+// It is what `heimdall config show` needs to explain WHERE each value came from
+// (ADR-002 precedence: env > flag > file > default). Load is the provenance-free
+// façade over the same resolution, so the two can never diverge.
+func LoadWithSources(opts Options) (Config, Fields, error) {
+	return load(opts)
+}
+
+// load is the single resolution engine. sources records, per dotted key, the
+// LAST layer that set it, which is exactly the layer that won under the
+// documented precedence.
+func load(opts Options) (Config, Fields, error) {
 	cfg := Defaults()
+	sources := Fields{}
 
 	fileVals, err := readFileValues(opts)
 	if err != nil {
-		return Config{}, err
+		return Config{}, nil, err
 	}
 
 	// A config_version above this build's schema is refused outright; a lower
@@ -58,38 +75,110 @@ func Load(opts Options) (Config, error) {
 	if v, ok := fileVals["config_version"]; ok {
 		n, err := strconv.Atoi(v)
 		if err != nil {
-			return Config{}, domain.New(domain.CodeConfigInvalidVersion,
+			return Config{}, nil, domain.New(domain.CodeConfigInvalidVersion,
 				domain.WithHTTPStatus(500),
 				domain.WithParams(map[string]string{"version": v}),
 			)
 		}
 		if n > CurrentConfigVersion {
-			return Config{}, domain.New(domain.CodeConfigInvalidVersion,
+			return Config{}, nil, domain.New(domain.CodeConfigInvalidVersion,
 				domain.WithHTTPStatus(500),
 				domain.WithParams(map[string]string{"version": v}),
 			)
 		}
 		if n < CurrentConfigVersion {
 			if fileVals, err = upgradeFn(fileVals); err != nil {
-				return Config{}, err
+				return Config{}, nil, err
 			}
 		}
 	}
 
 	// Apply in ascending priority: defaults are already in cfg, then file,
-	// then flags, then environment. Later layers win.
-	for _, layer := range []map[string]string{fileVals, flagLayer(opts.Flags), envLayer(opts.Env)} {
-		for _, k := range sortedKeys(layer) {
-			if err := set(&cfg, k, layer[k]); err != nil {
-				return Config{}, err
+	// then flags, then environment. Later layers win, so each successful set
+	// OVERWRITES the recorded source.
+	for _, layer := range []struct {
+		values map[string]string
+		source Source
+	}{
+		{fileVals, SourceFile},
+		{flagLayer(opts.Flags), SourceFlag},
+		{envLayer(opts.Env), SourceEnv},
+	} {
+		for _, k := range sortedKeys(layer.values) {
+			// Only a key this build RECOGNISES is recorded: an unknown key is
+			// ignored by set (forward-compatible) and must not appear as if it
+			// had taken effect.
+			if !knownKey(k) {
+				continue
 			}
+			if err := set(&cfg, k, layer.values[k]); err != nil {
+				return Config{}, nil, err
+			}
+			sources[k] = layer.source
 		}
 	}
 
 	if err := cfg.Validate(); err != nil {
-		return Config{}, err
+		return Config{}, nil, err
 	}
-	return cfg, nil
+	return cfg, sources, nil
+}
+
+// knownKey reports whether a dotted key is one this build recognises. It probes
+// the SAME setters `set` dispatches to against a throwaway config, so the two
+// can never drift: a key is "known" exactly when some setter claims it. The
+// value is irrelevant (an unrecognised key reports handled=false regardless);
+// a recognised key with an invalid value still reports handled=true and would
+// surface its typed error through set.
+func knownKey(key string) bool {
+	var scratch Config
+	if ok, _ := setMemoryGateParam(&scratch, key, ""); ok {
+		return true
+	}
+	if ok, _ := setSecurityGateParam(&scratch, key, ""); ok {
+		return true
+	}
+	if ok, _ := setHTTPSecurityParam(&scratch, key, ""); ok {
+		return true
+	}
+	if _, _, ok := parseProviderKey(key); ok {
+		return true
+	}
+	if _, _, ok := parseTokenEngineKey(key); ok {
+		return true
+	}
+	if _, ok := parseGateSwitch(key); ok {
+		return true
+	}
+	switch key {
+	case "config_version", "server.host", "server.port", "server.allow_remote",
+		"log.level", "log.format", "store.path", "store.token_path",
+		"features.gates.token", "features.gates.memory", "features.gates.security",
+		"passthrough.family", "passthrough.base_url", "passthrough.api_key",
+		"passthrough.api_key_env":
+		return true
+	}
+	return false
+}
+
+// ResolvePath returns the config file that WOULD be read for these options,
+// empty when none is found. It uses the same selection rule as readFileValues
+// (explicit path > HEIMDALL_CONFIG > default names) so `config path` reports the
+// real file instead of a second implementation that could drift.
+func ResolvePath(opts Options) string {
+	path := opts.FilePath
+	if path == "" {
+		path = envLookup(opts.Env, ConfigEnvVar)
+	}
+	if path != "" {
+		return path
+	}
+	for _, name := range defaultFileNames {
+		if _, err := statFn(name); err == nil {
+			return name
+		}
+	}
+	return ""
 }
 
 // readFileValues loads and flattens the config file. A missing explicit path is

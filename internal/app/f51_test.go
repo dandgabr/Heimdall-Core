@@ -123,8 +123,8 @@ func TestClientKeyNotAcceptedOnManagement(t *testing.T) {
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("client key accepted on management API: %d", rr.Code)
 	}
-	if !strings.Contains(rr.Body.String(), domain.CodeUnauthorized) {
-		t.Fatalf("body = %q, want error.unauthorized", rr.Body.String())
+	if !strings.Contains(rr.Body.String(), domain.CodeManagementAuthFailed) {
+		t.Fatalf("body = %q, want api.mgmt.token_invalid", rr.Body.String())
 	}
 }
 
@@ -352,3 +352,96 @@ func assertNoPlaintextInVault(t *testing.T, a *App, plaintext string) {
 
 // readFile is the byte-level vault reader the plaintext-absence test needs.
 func readFile(path string) ([]byte, error) { return os.ReadFile(path) }
+
+// TestTokenRotationThrottledEndToEnd is the F5-3 acceptance test at the
+// assembled handler: a second immediate rotation is refused with a typed 429 +
+// Retry-After, and the first still succeeds.
+func TestTokenRotationThrottledEndToEnd(t *testing.T) {
+	a := buildTestApp(t)
+	token := readTokenFile(t, a)
+
+	rotate := func(current string) *httptest.ResponseRecorder {
+		req := f51Request(http.MethodPost, "/api/mgmt/token/rotate", "{}")
+		req.Header.Set("Authorization", "Bearer "+current)
+		rr := httptest.NewRecorder()
+		a.Handler().ServeHTTP(rr, req)
+		return rr
+	}
+
+	first := rotate(token)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first rotation = %d, want 200 (body %s)", first.Code, first.Body.String())
+	}
+	// The old token is now invalid; read the NEW one so the second request
+	// authenticates and reaches the rotation throttle (the throttle is what we
+	// are testing, not authentication).
+	newToken := readTokenFile(t, a)
+	second := rotate(newToken)
+	if second.Code != http.StatusTooManyRequests {
+		t.Fatalf("second rotation = %d, want 429 (body %s)", second.Code, second.Body.String())
+	}
+	if second.Header().Get("Retry-After") == "" {
+		t.Fatal("429 missing Retry-After")
+	}
+	if !strings.Contains(second.Body.String(), domain.CodeTokenRotateThrottled) {
+		t.Fatalf("body = %q, want token.rotate_throttled", second.Body.String())
+	}
+}
+
+// TestHostAllowlistFromServerHost is the F5-5 acceptance test: with
+// allow_remote and a NAMED server.host, the Host guard admits that name
+// (ADR-SEC-06 §3.1) while still refusing an unrelated public name.
+func TestHostAllowlistFromServerHost(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Store.Path = dir + "/heimdall.db"
+	cfg.Store.TokenPath = dir + "/management-token"
+	cfg.Server.Host = "router.lan"
+	cfg.Server.AllowRemote = true
+
+	a, err := Build(Options{Config: cfg, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer func() { _ = a.Close() }()
+
+	// The configured host is admitted (it is on the derived allowlist).
+	req := f51Request(http.MethodGet, "/health", "")
+	req.Host = "router.lan:8787"
+	rr := httptest.NewRecorder()
+	a.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("configured host = %d, want 200 (body %s)", rr.Code, rr.Body.String())
+	}
+
+	// An unrelated public name is still refused.
+	evil := f51Request(http.MethodGet, "/health", "")
+	evil.Host = "evil.com"
+	rr2 := httptest.NewRecorder()
+	a.Handler().ServeHTTP(rr2, evil)
+	if rr2.Code != http.StatusForbidden {
+		t.Fatalf("evil host = %d, want 403", rr2.Code)
+	}
+}
+
+// TestHostAllowlistIgnoresWildcardBind proves a wildcard server.host is NOT
+// added: "0.0.0.0" is not a Host a client presents, so it must not widen the
+// guard.
+func TestHostAllowlistIgnoresWildcardBind(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Store.Path = dir + "/heimdall.db"
+	cfg.Store.TokenPath = dir + "/management-token"
+	cfg.Server.Host = "0.0.0.0"
+	cfg.Server.AllowRemote = true
+
+	a, err := Build(Options{Config: cfg, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer func() { _ = a.Close() }()
+
+	if got := a.hostAllowlist(); len(got) != 0 {
+		t.Fatalf("wildcard bind added to allowlist: %v", got)
+	}
+}

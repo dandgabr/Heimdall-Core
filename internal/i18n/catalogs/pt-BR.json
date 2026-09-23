@@ -77,6 +77,7 @@
   "startup.management_token_written": "Um token de gestão foi gerado e gravado em {path} (modo 0600).",
   "startup.shutdown": "Encerrando.",
   "api.mgmt.token_rotated": "Token de gestão rotacionado e gravado em {path} (modo 0600); o token anterior agora é inválido.",
+  "token.rotate_throttled": "A rotação de token está limitada; tente novamente após {retry_after} segundos.",
   "api.mgmt.token_invalid": "Token de gestão inválido.",
   "clientkey.invalid": "Chave de cliente inválida ou ausente.",
   "clientkey.store_failed": "Não foi possível gerenciar a chave de cliente.",
@@ -99,5 +100,10 @@
   "security.rate_limited": "Muitas requisições para esta chave de cliente; tente novamente após {retry_after} segundos.",
   "security.destination_denied": "A requisição referencia um destino de rede proibido ({host}).",
   "security.injection_detected": "A requisição foi recusada pela política de injeção de prompt.",
-  "security.pii_blocked": "A requisição foi recusada por conter dados pessoais ({types})."
+  "security.pii_blocked": "A requisição foi recusada por conter dados pessoais ({types}).",
+  "cli.quota.no_state": "Nenhuma cota foi registrada para a credencial {id} ainda (nada foi observado; o filtro fail-open).",
+  "cli.quota.unknown": "Nenhuma credencial armazenada com o id {id}.",
+  "cli.gate.not_enabled": "O gate {name} não está na cadeia efetiva; pode estar desabilitado por configuração.",
+  "cli.gate.config_only": "Os gates são habilitados no arquivo de configuração; a cadeia é montada uma vez no boot, então não há enable/disable em runtime.",
+  "cli.config.no_file": "Nenhum arquivo de configuração encontrado; os padrões embutidos estão em vigor."
 }

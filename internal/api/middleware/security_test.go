@@ -374,47 +374,80 @@ func TestKeyInQueryDirect(t *testing.T) {
 }
 
 // TestLoginThrottle covers the per-IP failed-auth throttle (ADR-SEC-06 §4.2).
+// TestLoginThrottle covers the windowed burst-then-cooldown model of
+// ADR-SEC-06 §4.2: within a window, `limit` failures are allowed; the limit
+// failure locks the IP for the FULL window (not a per-second refill).
 func TestLoginThrottle(t *testing.T) {
 	now := time.Unix(0, 0)
 	th := NewLoginThrottle(2, time.Minute, func() time.Time { return now })
 
+	// Two failures are permitted within the window.
 	if !th.Allow("a") {
 		t.Fatal("first attempt blocked")
 	}
 	th.Fail("a")
+	if !th.Allow("a") {
+		t.Fatal("second attempt blocked before the limit")
+	}
 	th.Fail("a")
+	// The limit failure locks the IP for the FULL window.
 	if th.Allow("a") {
-		t.Fatal("third attempt allowed after 2 failures")
+		t.Fatal("attempt allowed after reaching the limit")
 	}
-	if ra := th.RetryAfter("a"); ra <= 0 {
-		t.Fatalf("retry-after = %v, want > 0", ra)
+	if ra := th.RetryAfter("a"); ra != time.Minute {
+		t.Fatalf("retry-after = %v, want the full window (1m)", ra)
 	}
-	// A different IP has its own bucket.
+	// A different IP has its own window.
 	if !th.Allow("b") {
 		t.Fatal("distinct IP blocked")
 	}
-	// After the interval the bucket refills.
-	now = now.Add(2 * time.Minute)
+	// Still locked just before the window elapses (no early refill).
+	now = now.Add(59 * time.Second)
+	if th.Allow("a") {
+		t.Fatal("IP unlocked before the full cooldown elapsed")
+	}
+	// Unlocked once the full window has passed.
+	now = now.Add(2 * time.Second)
 	if !th.Allow("a") {
-		t.Fatal("bucket did not refill")
+		t.Fatal("IP still locked after the cooldown")
 	}
 	// Success clears the history.
 	th.Fail("a")
 	th.Success("a")
 	if !th.Allow("a") {
-		t.Fatal("success did not reset the bucket")
+		t.Fatal("success did not reset the window")
 	}
 	if ra := th.RetryAfter("a"); ra != 0 {
 		t.Fatalf("retry-after after success = %v, want 0", ra)
 	}
 }
 
+// TestLoginThrottleWindowResetsAfterCooldown proves a fresh window starts after
+// the lock lapses (a second burst is allowed).
+func TestLoginThrottleWindowResetsAfterCooldown(t *testing.T) {
+	now := time.Unix(0, 0)
+	th := NewLoginThrottle(1, time.Minute, func() time.Time { return now })
+	th.Fail("ip") // locks immediately (limit 1)
+	if th.Allow("ip") {
+		t.Fatal("locked IP allowed")
+	}
+	now = now.Add(time.Minute)
+	if !th.Allow("ip") {
+		t.Fatal("IP still locked after the window")
+	}
+	// A new failure in the fresh window locks again.
+	th.Fail("ip")
+	if th.Allow("ip") {
+		t.Fatal("second burst not throttled")
+	}
+}
+
 func TestLoginThrottleNilAndDisabled(t *testing.T) {
 	if NewLoginThrottle(0, time.Minute, nil) != nil {
-		t.Fatal("zero rate should disable the throttle")
+		t.Fatal("zero limit should disable the throttle")
 	}
 	if NewLoginThrottle(5, 0, nil) != nil {
-		t.Fatal("zero interval should disable the throttle")
+		t.Fatal("zero window should disable the throttle")
 	}
 	// A nil clock falls back to time.Now (non-nil throttle).
 	if NewLoginThrottle(5, time.Minute, nil) == nil {
@@ -431,21 +464,29 @@ func TestLoginThrottleNilAndDisabled(t *testing.T) {
 	}
 }
 
-// TestLoginThrottleFailBelowZero covers the Fail branch where the bucket is
-// already empty (tokens floored at 0, not negative).
-func TestLoginThrottleFailBelowZero(t *testing.T) {
+// TestLoginThrottleDefaultIsADRWindow proves the shipped defaults are the ADR's
+// "5 falhas/min, cooldown de 60s": five failures then a 60s Retry-After.
+func TestLoginThrottleDefaultIsADRWindow(t *testing.T) {
 	now := time.Unix(0, 0)
-	th := NewLoginThrottle(1, time.Minute, func() time.Time { return now })
-	th.Fail("ip") // tokens 1 -> 0
-	th.Fail("ip") // tokens 0 -> floored 0 (not -1)
-	th.Fail("ip")
+	th := NewLoginThrottle(5, time.Minute, func() time.Time { return now })
+	for i := 0; i < 5; i++ {
+		if !th.Allow("ip") {
+			t.Fatalf("attempt %d blocked before the limit", i)
+		}
+		th.Fail("ip")
+	}
 	if th.Allow("ip") {
-		t.Fatal("bucket refilled without time passing")
+		t.Fatal("sixth attempt allowed after 5 failures")
+	}
+	// The cooldown is the FULL 60s (the ADR's number), not 12s.
+	if ra := th.RetryAfter("ip"); ra != 60*time.Second {
+		t.Fatalf("retry-after = %v, want exactly 60s (ADR §4.2)", ra)
 	}
 }
 
 // TestManagementAuthThrottle exercises the failed-auth throttle wired into the
-// management guard: repeated failures return 429 with Retry-After.
+// management guard: repeated failures return 429 with Retry-After, and the
+// rejection carries the management-token code (ADR-SEC-06 §7.3).
 func TestManagementAuthThrottle(t *testing.T) {
 	now := time.Unix(0, 0)
 	auth := ManagementAuth{
@@ -462,7 +503,7 @@ func TestManagementAuthThrottle(t *testing.T) {
 		guarded.ServeHTTP(rec, req)
 		return rec
 	}
-	// Two failures exhaust the bucket; the third is throttled before verify.
+	// Two failures reach the limit; the third is throttled before verify.
 	for i := 0; i < 2; i++ {
 		if rec := fail(); rec.Code != http.StatusUnauthorized {
 			t.Fatalf("failure %d status = %d, want 401", i, rec.Code)
@@ -486,6 +527,22 @@ func TestManagementAuthThrottle(t *testing.T) {
 	guarded.ServeHTTP(grec, good)
 	if grec.Code != http.StatusOK {
 		t.Fatalf("valid token from a fresh IP = %d, want 200", grec.Code)
+	}
+}
+
+// TestManagementAuthEmitsTokenInvalidCode proves a rejected operator credential
+// (or a client key misused as one) returns api.mgmt.token_invalid (ADR-SEC-06
+// §7.3), not the generic error.unauthorized.
+func TestManagementAuthEmitsTokenInvalidCode(t *testing.T) {
+	auth := ManagementAuth{Verify: func(string) bool { return false }}
+	rec := httptest.NewRecorder()
+	auth.Middleware(okHandler()).ServeHTTP(rec,
+		httptest.NewRequest(http.MethodGet, "/api/mgmt/ping", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), domain.CodeManagementAuthFailed) {
+		t.Fatalf("body = %q, want api.mgmt.token_invalid", rec.Body.String())
 	}
 }
 

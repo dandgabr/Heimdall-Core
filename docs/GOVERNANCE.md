@@ -19,8 +19,11 @@ abaixo são verdadeiros:
 3. **Validação independente concluída** — QA e, quando aplicável, arquitetura/código e
    segurança. O autor da implementação não valida o próprio trabalho.
 4. **Gates técnicos verdes:** `go build`, `go vet`, `go test -race`, `make lint`,
-   `make cover-check` (100,0% em `-race -covermode=atomic`, 0 blocos descobertos) e
-   cross-compile estático amd64 + arm64.
+   `make cover-check` (a cobertura **medida** é **100,0% em `-race -covermode=atomic`,
+   0 blocos descobertos**; o *piso* do alvo é `COVER_MIN`, hoje 98, para folga de
+   ramos defensivos novos — o valor de aceite da fase é o medido 100,0%, não o piso)
+   e cross-compile estático amd64 + arm64. Os gates de teste rodam com `-count=1`
+   para não aceitarem resultado cacheado.
 5. **Commit feito ao final da fase**, com mensagem descritiva, e working tree limpo.
 
 ## Por quê

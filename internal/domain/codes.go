@@ -178,6 +178,10 @@ const (
 	CodeStartupShutdown      = "startup.shutdown"
 	CodeTokenRotationOK      = "api.mgmt.token_rotated"
 	CodeManagementAuthFailed = "api.mgmt.token_invalid"
+	// CodeTokenRotateThrottled refuses a management-token rotation inside the
+	// ADR-SEC-06 §4.2 window (at most one rotation per 5s). It carries
+	// {retry_after} and is emitted with a Retry-After header, 429.
+	CodeTokenRotateThrottled = "token.rotate_throttled"
 
 	// clientkey.* — the F5 client-key authentication of the inference gateway
 	// (/v1/*, ADR-SEC-06 §2). The code is deliberately named "clientkey" so a
@@ -217,4 +221,26 @@ const (
 	// deliberately binds a non-loopback address (ADR-SEC-06 §6.2). It is a log
 	// message, not an HTTP error: the process keeps running.
 	CodeStartupWarningRemoteAccess = "startup.remote_access_warning"
+
+	// cli.* — operator-facing messages emitted by the F5.3 CLI commands (quota,
+	// gate, config). They are ordinary i18n codes localised from the same
+	// embedded catalogs as every other message (ADR-002): the CLI never prints
+	// server prose, it renders a code through the negotiated language.
+	//
+	//   - CodeCLIQuotaNoState: a stored credential has no recorded quota window
+	//     yet (the filter fail-opens); the honest answer is "nothing recorded".
+	//   - CodeCLIQuotaUnknown: `quota show` was given a credential id that is
+	//     not in the vault. Carries {id}.
+	//   - CodeCLIGateNotEnabled: `gate show` named a gate that is not in the
+	//     effective chain. Carries {name}; the message notes it may be disabled
+	//     by config.
+	//   - CodeCLIGateConfigOnly: gates are switched in the config file, so there
+	//     is no runtime enable/disable (the chain is built once at boot).
+	//   - CodeCLIConfigNoFile: `config show`/`config path` found no config file;
+	//     built-in defaults are in effect.
+	CodeCLIQuotaNoState   = "cli.quota.no_state"
+	CodeCLIQuotaUnknown   = "cli.quota.unknown"
+	CodeCLIGateNotEnabled = "cli.gate.not_enabled"
+	CodeCLIGateConfigOnly = "cli.gate.config_only"
+	CodeCLIConfigNoFile   = "cli.config.no_file"
 )

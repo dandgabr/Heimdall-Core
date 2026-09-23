@@ -109,7 +109,7 @@ Para prevenir ataques de negação de serviço e tentativas de brute-force:
 1. **Rate-Limit por Chave de Cliente (`/v1/*`):**
    - O throughput em `/v1/*` é limitado por chave de cliente autenticada (`client_key`), aplicando o algoritmo Token Bucket com base na configuração do cliente (`RateLimitConfig`).
    - O throttle reutiliza a infraestrutura de segurança estabelecida na ADR-SEC-04 (gate `RateLimit`).
-   - Exceder a taxa retorna HTTP 429 com envelope padronizado (`quota.rate_limited`), definindo o cabeçalho `Retry-After`.
+   - Exceder a taxa retorna HTTP 429 com envelope padronizado (`security.rate_limited`, o código do gate `RateLimit`; a classe `quota.*` é reservada à cota por credencial e ao login de gestão), definindo o cabeçalho `Retry-After`.
 2. **Rate-Limit por IP para a Management API e Rotação de Tokens:**
    - Tentativas de autenticação administrativa em `/api/mgmt/*` com token inválido sofrem throttling agressivo por IP de origem (mesmo em loopback, para conter processos maliciosos locais automatizados):
      - Máximo de 5 falhas consecutivas por minuto por IP;
@@ -150,8 +150,8 @@ A integridade do sistema operacional do host é protegida pelas seguintes salvag
 
 A validação da Fase F5 e a auditoria independente de conformidade medirão objetivamente os seguintes critérios:
 
-1. **Exigência de Chave de Cliente em `/v1/*`:** Requisições a endpoints `/v1/*` sem cabeçalho `Authorization: Bearer <key>` ou `x-api-key` são rejeitadas com HTTP 401 (`error.unauthorized`).
-2. **Rejeição do Token de Gestão no Gateway:** Uma requisição a `/v1/chat/completions` apresentando o Token de Gestão como bearer token é rejeitada com HTTP 401 (`auth.credential_invalid`).
+1. **Exigência de Chave de Cliente em `/v1/*`:** Requisições a endpoints `/v1/*` sem cabeçalho `Authorization: Bearer <key>` ou `x-api-key` são rejeitadas com HTTP 401 (`clientkey.invalid`; `error.unauthorized` é o código genérico equivalente).
+2. **Rejeição do Token de Gestão no Gateway:** Uma requisição a `/v1/chat/completions` apresentando o Token de Gestão como bearer token é rejeitada com HTTP 401 (`clientkey.invalid`, o mesmo de chave inválida/revogada — a recusa não revela se a credencial existia; `auth.credential_invalid` descreve a mesma classe de rejeição).
 3. **Rejeição da Chave de Cliente na Gestão:** Uma requisição a `/api/mgmt/*` apresentando uma Chave de Cliente é rejeitada com HTTP 401 (`api.mgmt.token_invalid`).
 4. **Rejeição de Chaves em Query Strings:** Requisições com chaves passadas via URL query param (`?api_key=...`) são rejeitadas com HTTP 400 (`error.invalid_request`).
 5. **Anti-DNS-Rebinding (`Host` Validation):** Requisições com cabeçalho `Host: evil.com` ou hosts não-loopback são rejeitadas com HTTP 403 antes de qualquer processamento de rota.
@@ -160,7 +160,7 @@ A validação da Fase F5 e a auditoria independente de conformidade medirão obj
 8. **Catch-All `LocalOnly` para Rotas de Gestão/Execução:** Qualquer endpoint sob `/api/mgmt/*` ou rota nova de execução acessada por peer IP não-loopback é sumariamente bloqueada com HTTP 403 (`error.forbidden_local_only`) antes de verificar autenticação.
 9. **Armazenamento Seguro de Chaves (Hash Only):** Chaves de cliente e tokens de gestão são armazenados no banco SQLite estritamente em formato de hash criptográfico (SHA-256), nunca em texto claro.
 10. **Comparação em Tempo Constante:** Todas as rotinas de verificação de tokens e hashes utilizam `crypto/subtle.ConstantTimeCompare`.
-11. **Rate-Limit por Chave de Cliente:** Disparos contínuos excedendo a cota configurada para a chave de cliente recebem HTTP 429 (`quota.rate_limited`) com cabeçalho `Retry-After`.
+11. **Rate-Limit por Chave de Cliente:** Disparos contínuos excedendo a cota configurada para a chave de cliente recebem HTTP 429 (`security.rate_limited`, com o cabeçalho `Retry-After`) no gateway de inferência `/v1/*`; a classe de erro `quota.rate_limited` é usada pelo rate-limit do login de gestão. Ambos são 429 com `Retry-After`.
 12. **Proibição de RCE/Execução Arbitrária:** A API não disponibiliza nenhum endpoint receptor de strings livres para execução de shell.
 
 ## Consequências

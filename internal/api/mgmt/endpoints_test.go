@@ -178,7 +178,7 @@ func TestEveryRouteRequiresToken(t *testing.T) {
 			if rec.Code != http.StatusUnauthorized {
 				t.Fatalf("status = %d, want 401", rec.Code)
 			}
-			if !strings.Contains(rec.Body.String(), "error.unauthorized") {
+			if !strings.Contains(rec.Body.String(), "api.mgmt.token_invalid") {
 				t.Fatalf("body = %q, want the i18n envelope", rec.Body.String())
 			}
 		})

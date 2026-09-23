@@ -163,7 +163,11 @@ func (a ManagementAuth) Middleware(next http.Handler) http.Handler {
 			if a.Throttle != nil {
 				a.Throttle.Fail(ip)
 			}
-			WriteError(w, r, domain.New(domain.CodeUnauthorized,
+			// A client key is NEVER accepted here: this guard only verifies the
+			// operator credential. The code names the management token
+			// specifically (ADR-SEC-06 §7.3), so a rejected client key is
+			// distinguishable from a missing operator credential.
+			WriteError(w, r, domain.New(domain.CodeManagementAuthFailed,
 				domain.WithHTTPStatus(http.StatusUnauthorized)))
 			return
 		}

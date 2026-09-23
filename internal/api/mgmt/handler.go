@@ -22,13 +22,26 @@ const MaxBodyBytes = 1 << 20
 type Handler struct {
 	auth middleware.ManagementAuth
 	svc  Service
+	// rotation throttles the token-rotation route (ADR-SEC-06 §4.2). It is
+	// built with the default window; a test may replace it with a tighter or
+	// clock-injected one.
+	rotation *RotationThrottle
 }
 
 // New builds the management handler. auth is applied to EVERY route (no
 // management route is public), and svc is the composition-root implementation
 // of the management port.
 func New(auth middleware.ManagementAuth, svc Service) *Handler {
-	return &Handler{auth: auth, svc: svc}
+	return &Handler{auth: auth, svc: svc, rotation: NewRotationThrottle(DefaultRotationWindow, nil)}
+}
+
+// WithRotationThrottle replaces the rotation throttle, so the composition root
+// can share ONE throttle across Handler() instances (a per-Handler throttle
+// would forget the last rotation and never enforce the window). A nil throttle
+// disables rotation limiting.
+func (h *Handler) WithRotationThrottle(t *RotationThrottle) *Handler {
+	h.rotation = t
+	return h
 }
 
 // Register mounts the management routes on mux.
@@ -227,17 +240,6 @@ func (h *Handler) usage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, v)
-}
-
-func (h *Handler) rotateToken(w http.ResponseWriter, r *http.Request) {
-	v, err := h.svc.RotateToken(r.Context())
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
-	// A rotated token is a one-time secret: never cached, never reused.
-	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, v)
 }
 

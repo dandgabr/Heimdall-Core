@@ -113,7 +113,7 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.AddCommand(newServeCmd(), newVersionCmd(), newTokenCmd(), newClientKeyCmd(), newProviderCmd(), newComboCmd())
+	root.AddCommand(newServeCmd(), newVersionCmd(), newTokenCmd(), newClientKeyCmd(), newProviderCmd(), newComboCmd(), newQuotaCmd(), newGateCmd(), newConfigCmd())
 	return root
 }
 
@@ -818,9 +818,11 @@ func newComboDeleteCmd() *cobra.Command {
 	return cmd
 }
 
-// buildReadOnly loads the config and builds the app for a management command
-// that does not start the listener.
-func buildReadOnly(configPath string) (*app.App, error) {
+// buildReadOnly is the seam the read-only management commands use to build the
+// app without starting the listener. It is a package variable so a test can
+// inject an App whose vault has since become unreadable, reaching the commands'
+// store-error branches (which a fresh boot fails closed before).
+var buildReadOnly = func(configPath string) (*app.App, error) {
 	cfg, err := config.Load(config.Options{FilePath: configPath, Env: environ()})
 	if err != nil {
 		return nil, err

@@ -71,8 +71,12 @@ type App struct {
 	// per-Handler instance would reset the counter on every call and never
 	// throttle. A test may set it before calling Handler().
 	loginThrottle *middleware.LoginThrottle
-	Providers     *providers.Registry
-	Flows         *auth.FlowFactory
+	// rotationThrottle is the management-token rotation frequency lock
+	// (ADR-SEC-06 §4.2, 1/5s). Built ONCE for the same reason as loginThrottle:
+	// a per-Handler instance would forget the last rotation and never throttle.
+	rotationThrottle *mgmt.RotationThrottle
+	Providers        *providers.Registry
+	Flows            *auth.FlowFactory
 	// Gates is the frozen gate chain, wired with the F1 logger gate.
 	Gates *pipeline.Chain
 	// GateOrder is the per-stage order the gate registry computed at boot
@@ -325,6 +329,7 @@ func (a *App) wireVault(opts Options) error {
 		a.Config.Security.ManagementLoginRateLimit.Interval,
 		nil,
 	)
+	a.rotationThrottle = mgmt.NewRotationThrottle(mgmt.DefaultRotationWindow, nil)
 
 	// The provider registry is always available: listing providers needs no key.
 	//
@@ -404,8 +409,13 @@ func (a *App) wireVault(opts Options) error {
 	// the row, which is fine and required before the first seal.
 
 	custody := secret.Custody{
-		Env:              a.env,
-		KeyFilePath:      secret.DefaultKeyFilePath(),
+		Env: a.env,
+		// Resolve the key-file path against the SAME injected environment the
+		// custody chain reads, never the process environment: a test that runs
+		// with an empty env must not see the host operator's real key file
+		// (F5-1 hermeticity). Production injects the full process snapshot, so
+		// the result is identical there.
+		KeyFilePath:      secret.DefaultKeyFilePathFor(a.env),
 		AllowEnvOverride: false, // env only via explicit opt-in, never by default
 		Logger:           logger,
 	}
@@ -1418,7 +1428,7 @@ func (a *App) Handler() http.Handler {
 	mgmt.New(middleware.ManagementAuth{
 		Verify:   a.Store.VerifyManagementToken,
 		Throttle: a.loginThrottle,
-	}, a.NewManagementService()).Register(mux)
+	}, a.NewManagementService()).WithRotationThrottle(a.rotationThrottle).Register(mux)
 
 	// The F3 gateway owns POST /v1/chat/completions: it routes through the
 	// Router, executes through the Dispatcher and runs the GateChain. The legacy
@@ -1450,9 +1460,12 @@ func (a *App) Handler() http.Handler {
 	// already set when the envelope is written.
 	handler := middleware.ErrorEnvelope(mux)
 
-	// The gate chain observes every request through the metadata-only observer,
-	// outside the mux so a route added later is covered. It is wired here so the
-	// F1 logger gate actually runs in production, not only in tests.
+	// The gate chain observes the INFERENCE surface (/v1/*) through the
+	// metadata-only observer, outside the mux so a new /v1/* route is covered
+	// (F5-2: management/health/GUI are NOT run through the inference chain, so
+	// an inference rate-limit cannot throttle the operator's control surface).
+	// It is wired here so the F1 logger gate actually runs in production, not
+	// only in tests.
 	if a.Gates != nil {
 		if observer, err := appSeam.NewObserver(a.Gates); err == nil {
 			// The gateway drives the chain itself (PreRequest with the body it
@@ -1490,7 +1503,7 @@ func (a *App) Handler() http.Handler {
 	}
 	handler = middleware.OriginGuard(a.Config.Security.CORSAllowedOrigins)(handler)
 	handler = middleware.CORS(a.Config.Security.CORSAllowedOrigins)(handler)
-	handler = middleware.HostGuard(a.Config.Security.HostAllowlist)(handler)
+	handler = middleware.HostGuard(a.hostAllowlist())(handler)
 
 	handler = middleware.LocalOnly(handler)
 	handler = middleware.RequestID(domain.NewRequestID)(handler)
@@ -1506,6 +1519,34 @@ func (a *App) verifyClientKey(ctx context.Context, presented string) (domain.Cli
 		return "", false
 	}
 	return rec.ID, true
+}
+
+// hostAllowlist returns the accepted Host values for the anti-rebinding guard.
+//
+// It always includes the operator's security.host_allowlist, and — per
+// ADR-SEC-06 §3.1 — ALSO the configured server.host when server.allow_remote is
+// set and that host is a NAME (or non-loopback IP) rather than a bare bind
+// address. The ADR says: "Se allow-remote=true estiver configurado, adiciona-se
+// o hostname ou IP local configurado em server.host". Without this, an operator
+// who binds e.g. a LAN address and reaches the GUI by name would be refused by
+// the Host guard despite allow_remote.
+//
+// A wildcard bind is deliberately NOT added: "0.0.0.0"/"::" is not a name a
+// browser sends as Host, so adding it would only weaken the guard. An empty host
+// adds nothing.
+func (a *App) hostAllowlist() []string {
+	out := append([]string(nil), a.Config.Security.HostAllowlist...)
+	if !a.Config.Server.AllowRemote {
+		return out
+	}
+	h := strings.TrimSpace(a.Config.Server.Host)
+	switch h {
+	case "", "0.0.0.0", "::", "[::]":
+		// A wildcard/unspecified bind is not a Host value a client presents.
+		return out
+	}
+	out = append(out, h)
+	return out
 }
 
 // GateRecords returns a DEEP COPY of the metadata records the logger gate has

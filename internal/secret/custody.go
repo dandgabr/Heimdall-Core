@@ -338,14 +338,50 @@ func trimNewline(b []byte) []byte {
 // $XDG_DATA_HOME/heimdall/master-key, falling back to
 // ~/.local/share/heimdall/master-key. It sits next to the vault by default so a
 // single data directory holds the database, the token and the key file.
+//
+// It reads the PROCESS environment. Callers that have an injected environment
+// snapshot (the composition root, tests) must use DefaultKeyFilePathFor so the
+// resolved path matches the environment they actually run with — otherwise a
+// test sees the host operator's real key file (F5-1).
 func DefaultKeyFilePath() string {
-	base := os.Getenv("XDG_DATA_HOME")
+	return DefaultKeyFilePathFor(nil)
+}
+
+// DefaultKeyFilePathFor is DefaultKeyFilePath resolved against an injected
+// environment snapshot. A nil env falls back to the process environment; an
+// EMPTY (non-nil) env means "no variables set", so it derives purely from the
+// fallback home. This is what makes the custody path hermetic under test.
+func DefaultKeyFilePathFor(env map[string]string) string {
+	base := lookupEnv(env, "XDG_DATA_HOME")
 	if base == "" {
-		home, err := os.UserHomeDir()
-		if err != nil || home == "" {
+		home := homeDir(env)
+		if home == "" {
 			return "master-key"
 		}
 		base = filepath.Join(home, ".local", "share")
 	}
 	return filepath.Join(base, "heimdall", "master-key")
+}
+
+// lookupEnv reads a variable from the injected snapshot (or the process env when
+// the snapshot is nil).
+func lookupEnv(env map[string]string, name string) string {
+	if env != nil {
+		return env[name]
+	}
+	return os.Getenv(name)
+}
+
+// homeDir resolves the home directory from an injected snapshot first (HOME),
+// then the process user's home. It is the env-aware half of the default key
+// path, so an injected HOME fully determines the result.
+func homeDir(env map[string]string) string {
+	if env != nil {
+		return env["HOME"]
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return home
 }

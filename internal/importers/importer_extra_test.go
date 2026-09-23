@@ -254,3 +254,18 @@ func TestImportAllAntigravityError(t *testing.T) {
 	}
 	antigravityImport = old
 }
+
+// TestImporterHomeInjectedEnvIsHermetic is the F5-1 regression guard for the
+// importer: an INJECTED environment is authoritative, so an empty env HOME
+// yields "." rather than silently reading the host operator's real home (which
+// would import the host's harness credentials during a test).
+func TestImporterHomeInjectedEnvIsHermetic(t *testing.T) {
+	t.Setenv("HOME", "/host/home-must-not-be-read")
+	if got := (&Importer{Env: map[string]string{}}).home(); got != "." {
+		t.Fatalf("home with an injected empty env = %q, want . (hermetic)", got)
+	}
+	// A nil env (no snapshot) is the only case that consults the process.
+	if got := (&Importer{}).home(); got == "" {
+		t.Fatal("home with a nil env returned empty")
+	}
+}

@@ -879,12 +879,13 @@ func freePort(t *testing.T) int {
 
 // TestGateLoggerRunsInRequestPath is the P3 wiring guard: the logger gate must
 // be invoked for a real request through the assembled handler, and it must never
-// record a body or a credential.
+// record a body or a credential. The observer drives the chain for the /v1/*
+// inference surface (F5-2), so the probe uses GET /v1/models.
 func TestGateLoggerRunsInRequestPath(t *testing.T) {
 	a, logBuf := buildTestAppWithLog(t)
 
 	const secret = "SUPER-SECRET-TOKEN"
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	req.RemoteAddr = "127.0.0.1:1234"
 	req.Host = "127.0.0.1"
 	req.Header.Set("Authorization", "Bearer "+secret)
@@ -894,7 +895,7 @@ func TestGateLoggerRunsInRequestPath(t *testing.T) {
 	a.Handler().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("health = %d, want 200", rec.Code)
+		t.Fatalf("models = %d, want 200", rec.Code)
 	}
 
 	records := a.GateRecords()
@@ -950,7 +951,8 @@ func TestObserverHandsHeaderNamesNotValues(t *testing.T) {
 	handler := observer.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	// The observer only drives the chain for /v1/* (F5-2).
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	req.Header.Set("Authorization", "Bearer "+secret)
 	req.Header.Set("Cookie", "session="+secret)
 	handler.ServeHTTP(httptest.NewRecorder(), req)
@@ -1851,16 +1853,17 @@ func TestHandlerConcurrentRequestsNoRace(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start // release all goroutines together to maximise contention
-			req := httptest.NewRequest(http.MethodGet, "/health", nil)
+			// /v1/models is on the observed inference surface (F5-2), so the
+			// chain runs and the sink is exercised under contention.
+			req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 			req.RemoteAddr = "127.0.0.1:1234"
 			req.Host = "127.0.0.1"
-			req.Host = "127.0.0.1" // loopback so LocalOnly admits it
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, req)
 			if rec.Code != http.StatusOK {
 				// Do not t.Fatalf from a goroutine; record and let the main
 				// goroutine fail below.
-				t.Errorf("health status = %d, want 200", rec.Code)
+				t.Errorf("models status = %d, want 200", rec.Code)
 			}
 		}()
 	}

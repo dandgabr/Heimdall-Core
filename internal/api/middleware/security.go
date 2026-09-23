@@ -337,59 +337,69 @@ func writeClientKeyInvalid(w http.ResponseWriter, r *http.Request) {
 }
 
 // LoginThrottle throttles failed management-token authentication per client IP
-// (ADR-SEC-06 §4.2): a token bucket of capacity Rate refilling Rate per
-// Interval; each FAILED attempt consumes a token, a success resets the bucket.
-// It is concurrency-safe and clock-injectable.
+// (ADR-SEC-06 §4.2): at most `limit` consecutive failures within `window`, and
+// once the limit is exceeded the IP is locked for a FULL `window` (the ADR's
+// 60s cooldown). A successful authentication clears the IP's history.
+//
+// This is a windowed burst-then-cooldown model, NOT a continuously-refilling
+// token bucket: the ADR specifies a discrete "5 falhas/min, depois cooldown de
+// 60s", which a per-second refill (1 token every 12s) would not honour. It is
+// concurrency-safe and clock-injectable.
 type LoginThrottle struct {
-	rate     int
-	interval time.Duration
-	now      func() time.Time
+	limit  int
+	window time.Duration
+	now    func() time.Time
 
 	mu      sync.Mutex
-	buckets map[string]*loginBucket
+	entries map[string]*loginEntry
 }
 
-type loginBucket struct {
-	tokens float64
-	last   time.Time
+// loginEntry is one IP's failure window.
+type loginEntry struct {
+	failures    int
+	windowStart time.Time
+	lockedUntil time.Time
 }
 
-// NewLoginThrottle builds the throttle. Rate <= 0 or Interval <= 0 disables it
+// NewLoginThrottle builds the throttle. limit <= 0 or window <= 0 disables it
 // (nil), so the caller can attach it conditionally without a second check.
-func NewLoginThrottle(rate int, interval time.Duration, now func() time.Time) *LoginThrottle {
-	if rate <= 0 || interval <= 0 {
+func NewLoginThrottle(limit int, window time.Duration, now func() time.Time) *LoginThrottle {
+	if limit <= 0 || window <= 0 {
 		return nil
 	}
 	if now == nil {
 		now = time.Now
 	}
-	return &LoginThrottle{rate: rate, interval: interval, now: now, buckets: map[string]*loginBucket{}}
+	return &LoginThrottle{limit: limit, window: window, now: now, entries: map[string]*loginEntry{}}
 }
 
-// Allow reports whether a request from ip may attempt authentication now. An
-// exhausted bucket means the IP is in cooldown.
+// Allow reports whether a request from ip may attempt authentication now. A
+// locked or over-limit IP is refused.
 func (t *LoginThrottle) Allow(ip string) bool {
 	if t == nil {
 		return true
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	b := t.bucketLocked(ip)
-	return b.tokens >= 1
+	e := t.entryLocked(ip)
+	if t.now().Before(e.lockedUntil) {
+		return false
+	}
+	return e.failures < t.limit
 }
 
-// Fail records a failed attempt, consuming one token.
+// Fail records a failed attempt. Reaching the limit locks the IP for a full
+// window (the ADR's 60s cooldown).
 func (t *LoginThrottle) Fail(ip string) {
 	if t == nil {
 		return
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	b := t.bucketLocked(ip)
-	if b.tokens >= 1 {
-		b.tokens--
-	} else {
-		b.tokens = 0
+	e := t.entryLocked(ip)
+	e.failures++
+	if e.failures >= t.limit {
+		e.lockedUntil = t.now().Add(t.window)
 	}
 }
 
@@ -400,40 +410,42 @@ func (t *LoginThrottle) Success(ip string) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	delete(t.buckets, ip)
+	delete(t.entries, ip)
 }
 
-// RetryAfter is the cooldown until one token refills, for the 429 Retry-After
-// header. It is the full interval when no tokens remain.
+// RetryAfter is the cooldown until the IP may retry: the remaining lock time, or
+// 0 when it is not locked.
 func (t *LoginThrottle) RetryAfter(ip string) time.Duration {
 	if t == nil {
 		return 0
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	b := t.bucketLocked(ip)
-	if b.tokens >= 1 {
-		return 0
+	e := t.entryLocked(ip)
+	if remaining := e.lockedUntil.Sub(t.now()); remaining > 0 {
+		return remaining
 	}
-	need := 1 - b.tokens
-	return time.Duration(need / float64(t.rate) * float64(t.interval))
+	return 0
 }
 
-// bucketLocked returns the IP's bucket, refilling it for the elapsed time.
-func (t *LoginThrottle) bucketLocked(ip string) *loginBucket {
+// entryLocked returns the IP's entry, resetting a window that has elapsed
+// (unless the IP is still locked).
+func (t *LoginThrottle) entryLocked(ip string) *loginEntry {
 	now := t.now()
-	b, ok := t.buckets[ip]
+	e, ok := t.entries[ip]
 	if !ok {
-		b = &loginBucket{tokens: float64(t.rate), last: now}
-		t.buckets[ip] = b
-		return b
+		e = &loginEntry{windowStart: now}
+		t.entries[ip] = e
+		return e
 	}
-	if elapsed := now.Sub(b.last); elapsed > 0 {
-		b.tokens += elapsed.Seconds() / t.interval.Seconds() * float64(t.rate)
-		if b.tokens > float64(t.rate) {
-			b.tokens = float64(t.rate)
-		}
-		b.last = now
+	// A lock outranks the window reset: while locked, leave the entry untouched.
+	if now.Before(e.lockedUntil) {
+		return e
 	}
-	return b
+	if now.Sub(e.windowStart) >= t.window {
+		e.failures = 0
+		e.windowStart = now
+		e.lockedUntil = time.Time{}
+	}
+	return e
 }

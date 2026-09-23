@@ -178,8 +178,10 @@ type Security struct {
 	// origins are never cross-origin permissive.
 	CORSAllowedOrigins []string
 	// ManagementLoginRateLimit throttles failed management-token authentication
-	// per client IP (ADR-SEC-06 §4.2): at most Rate failures per Interval, then
-	// a Retry-After cooldown. Zero Rate disables it.
+	// per client IP (ADR-SEC-06 §4.2): at most Rate failures within Interval,
+	// then the IP is locked for a full Interval (the ADR's 60s cooldown). The
+	// defaults (Rate=5, Interval=1m) ARE the ADR's "5 falhas/min, cooldown de
+	// 60s". Zero Rate disables it.
 	ManagementLoginRateLimit RateLimitConfig
 }
 

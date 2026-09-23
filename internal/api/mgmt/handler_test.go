@@ -56,8 +56,8 @@ func TestPingWithoutTokenIsUnauthorized(t *testing.T) {
 	if ct := rec.Header().Get("Content-Type"); ct != "application/json; charset=utf-8" {
 		t.Errorf("content-type = %q", ct)
 	}
-	if !strings.Contains(rec.Body.String(), "error.unauthorized") {
-		t.Errorf("body = %q, want error.unauthorized", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "api.mgmt.token_invalid") {
+		t.Errorf("body = %q, want api.mgmt.token_invalid", rec.Body.String())
 	}
 }
 

@@ -77,6 +77,7 @@
   "startup.management_token_written": "A management token was generated and written to {path} (mode 0600).",
   "startup.shutdown": "Shutting down.",
   "api.mgmt.token_rotated": "Management token rotated and written to {path} (mode 0600); the previous token is now invalid.",
+  "token.rotate_throttled": "Token rotation is throttled; retry after {retry_after} seconds.",
   "api.mgmt.token_invalid": "Invalid management token.",
   "clientkey.invalid": "Invalid or missing client key.",
   "clientkey.store_failed": "Could not manage the client key.",
@@ -99,5 +100,10 @@
   "security.rate_limited": "Too many requests for this client key; retry after {retry_after} seconds.",
   "security.destination_denied": "The request references a denied network destination ({host}).",
   "security.injection_detected": "The request was refused by the prompt-injection policy.",
-  "security.pii_blocked": "The request was refused because it contains personal data ({types})."
+  "security.pii_blocked": "The request was refused because it contains personal data ({types}).",
+  "cli.quota.no_state": "No quota has been recorded for credential {id} yet (nothing has been observed; the filter fail-opens).",
+  "cli.quota.unknown": "No stored credential with id {id}.",
+  "cli.gate.not_enabled": "Gate {name} is not in the effective chain; it may be disabled by configuration.",
+  "cli.gate.config_only": "Gates are enabled in the configuration file; the chain is built once at boot, so there is no runtime enable/disable.",
+  "cli.config.no_file": "No configuration file found; built-in defaults are in effect."
 }
