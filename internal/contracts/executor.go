@@ -194,6 +194,22 @@ type ExecutorDeps struct {
 	// client an Executor uses MUST come from it; building an http.Client
 	// directly is forbidden.
 	Egress EgressPolicy
+	// Refresher is the OPTIONAL renewal port of BD02-1: an executor holding an
+	// OAuth credential whose access token is at/past expiry calls it to obtain
+	// the refreshed, already-persisted credential before presenting the bearer.
+	// It is wired only by the composition root (the renewal needs the flow
+	// factory and the vault); a nil Refresher means "no renewal", and the
+	// credential is used as stored.
+	Refresher CredentialRefresher
+}
+
+// CredentialRefresher renews an OAuth credential at the point of use. The
+// implementation (composition root) performs the single-flight token exchange
+// against the provider and PERSISTS the refreshed credential before returning
+// it, so concurrent callers observe the same renewed row. On failure it
+// returns the error and the caller fails open with the stored credential.
+type CredentialRefresher interface {
+	RefreshCredential(ctx context.Context, cred Credential) (Credential, error)
 }
 
 // Validate reports whether the structurally required dependencies are present.

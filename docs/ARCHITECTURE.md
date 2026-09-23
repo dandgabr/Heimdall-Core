@@ -139,7 +139,7 @@ internal/
   secret/          custódia da KEK, envelope AES-256-GCM, KDF Argon2id
   providers/       registry + famílias declarativas (OpenAICompat, CloudCode)
   auth/            flows (device_code, pkce, apikey), descriptors
-    oauth/
+    oauth/         pkce (loopback efêmero), device_code, antigravity (post-exchange)
   executors/       transporte+auth por dialeto; cloudcode/ (Antigravity)
   translators/     OpenAI↔Anthropic↔Gemini (puro, golden files)
   egress/          política de SSRF/TLS/redirect (ADR-SEC-05)
@@ -163,7 +163,8 @@ internal/
   observability/   logger estruturado + ClientID no contexto
   importers/       importação read-only de credenciais de harness
   obfuscate/       camada de ocultação por provedor (ADR-0003)
-  app/             composition root
+  app/             composition root; login.go: BeginLogin/Complete/LoginStatus/
+                   RefreshProvider (single-flight) do `heimdall login`
 web/               fonte Svelte 5 + Vite (builda para internal/webui/dist/)
 scripts/           sbom-check.sh
 ```
@@ -236,7 +237,7 @@ flowchart TB
         ZAI["z.ai"]
         OLL["ollama-cloud"]
         CC["command-code"]
-        AG["antigravity (future)"]
+        AG["antigravity (OAuth: heimdall login)"]
     end
 
     OC -->|"Authorization: client key"| MW
@@ -255,7 +256,7 @@ flowchart TB
     EXEC -->|"TLS + egress policy"| ZAI
     EXEC --> OLL
     EXEC --> CC
-    EXEC -. "ocultação (future)" .-> AG
+    EXEC -. "ocultação (ADR-0003)" .-> AG
 
     CHAIN --> Gates
     VAULT --> DB

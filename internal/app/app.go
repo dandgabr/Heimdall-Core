@@ -725,6 +725,18 @@ func (a *App) ProviderTest(ctx context.Context, id domain.ProviderID) (ProviderT
 
 	cred, err := a.credentialFor(ctx, id)
 	if err != nil {
+		// Taxonomy alignment (BD02-3): an OAuth provider WITHOUT a credential
+		// is a login problem, not a "no credential" one — `provider test` must
+		// report the SAME code `provider status` reports for the state
+		// (provider.login_required), never the add-key advice.
+		if de, ok := err.(*domain.DomainError); ok && de.Code == domain.CodeProviderNoCredential &&
+			supportsAuthMode(family.AuthModes(), contracts.AuthOAuth) {
+			return ProviderTestResult{}, domain.New(domain.CodeProviderLoginRequired,
+				domain.WithHTTPStatus(401),
+				domain.WithScope(domain.ScopeCredential),
+				domain.WithParams(map[string]string{"provider": string(id)}),
+			)
+		}
 		return ProviderTestResult{}, err
 	}
 	if cred.AuthMode != contracts.AuthAPIKey {
@@ -1281,7 +1293,7 @@ func (a *App) wireRouting() error {
 
 	creds := credentialSource{store: a.Credentials, registry: a.Providers}
 	a.Dispatcher = dispatcher.New(
-		executorFactory{registry: a.Providers, secrets: a.Secrets},
+		executorFactory{registry: a.Providers, secrets: a.Secrets, refresher: credentialRefresher{app: a}},
 		creds,
 		a.Breaker,
 		a.QuotaFilt,
@@ -1304,6 +1316,10 @@ var newRouter = router.New
 type executorFactory struct {
 	registry *providers.Registry
 	secrets  *secret.Store
+	// refresher is the optional BD02-1 renewal port: it is wired only when the
+	// App is available, so an OAuth credential whose access token expired is
+	// renewed (single-flight, persisted) at the point of use.
+	refresher contracts.CredentialRefresher
 }
 
 // Build implements dispatcher.ExecutorFactory.
@@ -1313,10 +1329,11 @@ func (f executorFactory) Build(ctx context.Context, c contracts.Candidate, cred 
 		return nil, err
 	}
 	deps := contracts.ExecutorDeps{
-		Clock:    systemClock{},
-		IDs:      domainIDGen{},
-		Redactor: i18n.Redacter{},
-		Egress:   egress.New(),
+		Clock:     systemClock{},
+		IDs:       domainIDGen{},
+		Redactor:  i18n.Redacter{},
+		Egress:    egress.New(),
+		Refresher: f.refresher,
 	}
 	if f.secrets != nil {
 		deps.Secrets = f.secrets

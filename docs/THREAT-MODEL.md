@@ -112,8 +112,10 @@ backend aceitar a requisição. Isso **pode violar termos de uso e causar
 suspensão ou banimento** da conta. O dono do projeto aceitou esse risco
 conscientemente; a ADR-0003 revoga a cláusula "sem cloaking" da ADR-003. A
 ocultação é **do harness**, nunca da identidade do usuário, é por provedor e é
-sinalizada por `RISK_NOTICE` na CLI e na GUI. Estado: Antigravity é `future`,
-então a ocultação **não está em uso ativo** nesta build.
+sinalizada por `RISK_NOTICE` na CLI e na GUI. Estado: o Antigravity é
+autenticável via `heimdall login antigravity` (credencial selada no cofre;
+`blocked(provider.login_required)` sem login), então a ocultação **está em uso
+ativo** nesta build — o aviso de ToS é exibido na listagem e no login.
 
 ## 5. Dívidas abertas
 

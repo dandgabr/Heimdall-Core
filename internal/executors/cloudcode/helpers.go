@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/dandgabr/heimdall-core/internal/contracts"
 	"github.com/dandgabr/heimdall-core/internal/domain"
@@ -29,6 +30,35 @@ var jsonMarshal = json.Marshal
 // errIdleTimeout marks an SSE idle expiry (mirrors the OpenAI-compatible
 // executor): a plain sentinel classified explicitly by transportError.
 var errIdleTimeout = errors.New("cloudcode: sse stream idle timeout")
+
+// refreshLeeway renews the OAuth access token slightly BEFORE its hard expiry,
+// so a token that dies mid-request is never sent.
+const refreshLeeway = 30 * time.Second
+
+// oauthCredentialExpired reports whether cred's access token is at (or within
+// the leeway of) its expiry. A zero ExpiresAt means "unknown": no renewal is
+// attempted, matching the credential contract.
+func oauthCredentialExpired(now time.Time, cred contracts.Credential) bool {
+	return cred.AuthMode == contracts.AuthOAuth &&
+		!cred.ExpiresAt.IsZero() &&
+		!now.Before(cred.ExpiresAt.Add(-refreshLeeway))
+}
+
+// renewedCredential returns cred, refreshed through the optional Refresher
+// port when its OAuth access token is at/past expiry (BD02-1). The renewal is
+// best-effort FAIL-OPEN: a refresh failure (transient upstream, missing client
+// secret) keeps the stored token so the request behaves exactly as before the
+// hook — a token the provider rejects is mapped per ADR-0002 as before.
+func (e *Executor) renewedCredential(ctx context.Context, cred contracts.Credential) contracts.Credential {
+	if e.deps.Refresher == nil || !oauthCredentialExpired(e.now(), cred) {
+		return cred
+	}
+	fresh, err := e.deps.Refresher.RefreshCredential(ctx, cred)
+	if err != nil {
+		return cred
+	}
+	return fresh
+}
 
 // openCredential resolves the credential's secret. AuthNone returns empty;
 // AuthAPIKey opens the sealed blob as the raw key; AuthOAuth opens a

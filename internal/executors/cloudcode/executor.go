@@ -245,8 +245,11 @@ func (e *Executor) post(ctx context.Context, url string, env envelope, cred cont
 }
 
 // newRequest builds the HTTP request with the envelope body, auth header and the
-// obfuscated User-Agent.
+// obfuscated User-Agent. Before the sealed blob is opened, an expired OAuth
+// credential is renewed through the optional Refresher port (BD02-1), so the
+// bearer presented upstream is the persisted, refreshed token.
 func (e *Executor) newRequest(ctx context.Context, url string, env envelope, cred contracts.Credential) (*http.Request, error) {
+	cred = e.renewedCredential(ctx, cred)
 	secret, err := openCredential(e.deps, cred)
 	if err != nil {
 		return nil, err

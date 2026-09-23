@@ -479,6 +479,52 @@ func TestLoginStatusWithoutCredential(t *testing.T) {
 
 // --- refresh (BD-02 §3) ---
 
+// TestCredentialRefresher is the BD02-1 adapter test: the port runs the
+// single-flight refresh and returns the PERSISTED renewed credential; on a
+// refresh failure it returns the original credential alongside the error (the
+// executor fails open with it).
+func TestCredentialRefresher(t *testing.T) {
+	fake := &loginFake{rotate: true}
+	a := buildLoginApp(t, fake, "direct", nil)
+	res := loginPasted(t, a)
+	r := credentialRefresher{app: a}
+	cred, err := a.Credentials.Get(context.Background(), res.CredentialID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	fresh, err := r.RefreshCredential(context.Background(), cred)
+	if err != nil {
+		t.Fatalf("RefreshCredential: %v", err)
+	}
+	if fresh.ID != cred.ID || fresh.Provider != "antigravity" {
+		t.Fatalf("fresh = %+v, want the same credential row renewed", fresh)
+	}
+	blob := openStoredBlob(t, a, fresh)
+	if blob.AccessToken != "AT-2" || blob.RefreshToken != "RT-2" {
+		t.Fatalf("blob = %+v, want the rotated pair", blob)
+	}
+	if atomic.LoadInt32(&fake.refreshes) != 1 {
+		t.Fatalf("upstream refreshes = %d, want 1", fake.refreshes)
+	}
+
+	// Failure branch: without the operator client secret the refresh fails
+	// closed and the ORIGINAL credential comes back with the error.
+	noSecret := buildLoginApp(t, &loginFake{}, "", nil)
+	origID := sealOAuthRaw(t, noSecret, "antigravity", []byte(`{"access_token":"AT-9","refresh_token":"RT-9"}`))
+	orig, err := noSecret.Credentials.Get(context.Background(), origID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	got, err := credentialRefresher{app: noSecret}.RefreshCredential(context.Background(), orig)
+	if !hasCode(err, domain.CodeAuthProviderClientSecretMissing) {
+		t.Fatalf("err = %v, want %s", err, domain.CodeAuthProviderClientSecretMissing)
+	}
+	if got.ID != orig.ID || string(got.Sealed) != string(orig.Sealed) {
+		t.Fatalf("got = %+v, want the original credential unchanged", got)
+	}
+}
+
 // TestRefreshSingleFlightAndRotation is the §3 acceptance test: N concurrent
 // refreshers produce EXACTLY ONE upstream exchange; the rotated refresh token
 // replaces the stored one; the projectId/tier survive in Meta.

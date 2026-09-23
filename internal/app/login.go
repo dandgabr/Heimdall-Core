@@ -468,6 +468,24 @@ func (a *App) upsertOAuthBlob(ctx context.Context, provider domain.ProviderID, c
 	return a.Credentials.Upsert(ctx, cred)
 }
 
+// credentialRefresher adapts the App to the executors' optional
+// contracts.CredentialRefresher port (BD02-1): it runs the single-flight
+// refresh through RefreshProvider and re-reads the persisted row, so the
+// executor presents the renewed bearer and concurrent requests observe the
+// same renewed credential. On refresh failure it returns the ORIGINAL
+// credential alongside the error (the executor fails open with it).
+type credentialRefresher struct {
+	app *App
+}
+
+// RefreshCredential implements contracts.CredentialRefresher.
+func (r credentialRefresher) RefreshCredential(ctx context.Context, cred contracts.Credential) (contracts.Credential, error) {
+	if _, err := r.app.RefreshProvider(ctx, cred.Provider); err != nil {
+		return cred, err
+	}
+	return r.app.Credentials.Get(ctx, cred.ID)
+}
+
 // openOAuthBlob decrypts and parses a stored OAuth credential. A decrypt
 // failure is auth.secret_missing (the KEK cannot open the row); a malformed
 // document is auth.credential_invalid — the row is readable but unusable and

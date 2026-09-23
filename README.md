@@ -34,17 +34,11 @@ contra o commit `4a68b7e`:
 
 O que **não** funciona nesta build, dito sem rodeio:
 
-- **Antigravity** (Google CloudCode) é um provedor `future`: o conector e a
-  ocultação existem e são testados, mas não há login OAuth interativo nem wiring
-  no roteador ainda. `heimdall provider list` o mostra como `future`.
 - **Busca vetorial da memória (`vec0`) não existe.** O driver
   `modernc.org/sqlite v1.59.0` não expõe a extensão `vec0`, então o gate de
   memória é **FTS5-only** (retrieval lexical). É a dívida **M-1** em
   [`docs/SECURITY-DEBT.md`](docs/SECURITY-DEBT.md); o modo vetorial degrada para
   FTS5 sem falhar o boot.
-- **`heimdall login` não existe.** Provedores OAuth dependem de um fluxo que
-  ainda não tem superfície na CLI; hoje só os provedores por API key
-  (`z.ai`, `ollama-cloud`, `command-code`) são utilizáveis de ponta a ponta.
 - **`GET /v1/models` devolve uma lista vazia.** A rota existe e responde no
   envelope OpenAI, mas o catálogo servido por ela ainda não é populado a partir
   do registry.
@@ -152,6 +146,7 @@ heimdall [command]
   token        Gestão do token de gestão (rotate)
   client-key   Chaves de cliente para o gateway de inferência (create/list/revoke)
   provider     Inspeção e importação de credenciais
+  login        Login OAuth interativo de um provedor (ex.: Antigravity)
   combo        Criação, listagem e remoção de combos nomeados
   quota        Inspeção das janelas de cota por credencial
   gate         Inspeção da cadeia efetiva de gates (ordem do DAG, estágios, políticas)
@@ -169,10 +164,11 @@ Detalhe dos subcomandos (todos aceitam `--config`):
 | `client-key list` | Lista `id`/`label`/estado (`active`/`revoked`); nunca a chave. |
 | `client-key revoke <id>` | Revoga uma chave por id. |
 | `provider add-key <id> [--label]` | Lê a API key do **stdin** (sem eco no terminal) e a sela no cofre. |
-| `provider list` | Provedores registrados, modos de auth e estado (`ready`/`blocked(...)`/`future`). |
+| `provider list` | Provedores registrados, modos de auth e estado (`ready`/`blocked(...)`). |
 | `provider status` | Readiness real: um provedor só é `ready` com credencial utilizável no cofre. |
 | `provider test <id>` | Probe ponta a ponta: monta o executor e chama `GET {base}/models`. Não envia chat. |
 | `provider import` | Importa credenciais de arquivos locais de harness (read-only) para o cofre. |
+| `login <id>` | Login OAuth interativo (Antigravity): imprime a URL de autorização, completa no callback loopback ou com `--code <code>`, e sela a credencial no cofre. `--status` mostra o estado sem segredo. |
 | `combo create <nome> <step>... [--strategy]` | Cria (ou substitui) um combo; cada step é `kind:ref[:weight]`. |
 | `combo list` / `combo delete <nome>` | Lista os combos persistidos / remove um. |
 | `quota list` / `quota show <cred-id>` | Janelas de cota e fração restante. **Não há `reset`**: cota é estado observado, não dado editável. |
@@ -189,11 +185,13 @@ para o catálogo completo e como adicionar novos):
 | `z.ai` | `openai` | API key | Sim |
 | `ollama-cloud` | `openai` | API key | Sim |
 | `command-code` | `openai` | API key | Sim |
-| `antigravity` | `cloudcode` | OAuth | Não — `future` (sem login/wiring) |
+| `antigravity` | `cloudcode` | OAuth | Sim — via `heimdall login antigravity` (exige o client secret do operador na config; risco de ToS: veja ADR-0003) |
 
 Um provedor só é considerado utilizável quando o cofre tem uma credencial cujo
 modo de auth a família suporta. Cadastre a chave com
-`provider add-key` (ou `provider import`). Para um provedor por API key o teste
+`provider add-key` (ou `provider import`); para o Antigravity rode
+`heimdall login antigravity` (ver [`docs/PROVIDERS.md`](docs/PROVIDERS.md)).
+Para um provedor por API key o teste
 offline valida a forma da chave, e `provider test` valida contra o upstream.
 
 Cada provedor tem seu transporte declarado em `[[providers]]` (`base_url`,

@@ -156,6 +156,23 @@ func TestProviderTestNoCredential(t *testing.T) {
 	}
 }
 
+// TestProviderTestOAuthWithoutCredentialIsLoginRequired is the BD02-3/BD02-4
+// acceptance test: an OAuth provider WITHOUT a credential reports the SAME
+// code `provider status` reports for the state (provider.login_required),
+// never provider.no_credential with its misleading add-key advice.
+func TestProviderTestOAuthWithoutCredentialIsLoginRequired(t *testing.T) {
+	a := buildProviderApp(t, "https://x/v1") // Antigravity secret injected, empty vault
+	_, err := a.ProviderTest(context.Background(), "antigravity")
+	if !hasCode(err, domain.CodeProviderLoginRequired) {
+		t.Fatalf("err = %v, want %s (aligned with provider status)", err, domain.CodeProviderLoginRequired)
+	}
+	// The message must be rendered without a literal placeholder.
+	b := i18n.MustNew()
+	if msg := b.FormatDomainError(err, "en"); strings.ContainsAny(msg, "{}") {
+		t.Fatalf("message has a literal placeholder: %q", msg)
+	}
+}
+
 // TestProviderTestOAuthLoginRequired covers the OAuth credential branch.
 func TestProviderTestOAuthLoginRequired(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) }))

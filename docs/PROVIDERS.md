@@ -183,12 +183,17 @@ heimdall login antigravity
   `heimdall login --status antigravity` reporta a credencial sem segredo
   (id, label, email, project, plan, expiração, `state=valid|expired`) ou
   `state=logged-out reason=provider.login_required`.
-- **Refresh**: o access token se renova com o refresh token do blob, sob o
-  lock de single-flight do `CredentialStore` (`N` chamadas simultâneas → exatamente
-  um exchange upstream), com o client secret da config e o `projectId`/tier
-  reaproveitados de `Meta`. Um refresh token rotacionado substitui o anterior;
-  um blob corrupto ou refresh token revogado falha com
-  `auth.credential_invalid` (novo login), nunca com token vazio.
+- **Refresh (automático no ponto de uso, BD02-1)**: quando o executor abre a
+  credencial e o access token está vencido (ou dentro da janela de 30s antes do
+  vencimento), ele aciona a renovação pela porta `Refresher` do composition
+  root: exchange com o refresh token do blob sob o lock de single-flight do
+  `CredentialStore` (`N` chamadas simultâneas → exatamente um exchange
+  upstream), client secret da config, `projectId`/tier reaproveitados de `Meta`
+  e persistência antes do uso. A renovação é *best-effort fail-open*: se falhar
+  (rede, secret ausente), a requisição segue com o token armazenado — um token
+  recusado pelo provedor é mapeado pela taxonomia ADR-0002 como antes. Um
+  refresh token rotacionado substitui o anterior; um blob corrupto ou refresh
+  token revogado exige novo login (`heimdall login`), nunca um token vazio.
 - **RISK_NOTICE (ADR-0003 §4)**: o `heimdall login antigravity` exibe o aviso
   de ToS antes da autorização — usar a sessão de assinatura como proxy pode
   causar **suspensão ou banimento** da conta; risco aceito pelo dono do projeto.
@@ -246,8 +251,10 @@ utilizável.
 
 ## Estados de readiness
 
-`provider list` e `provider status` compartilham a **mesma** regra
-(`providerReadiness`), então não podem divergir:
+`provider list`, `provider status` e `provider test` compartilham a **mesma**
+regra de classificação, então não podem divergir: para um provedor OAuth sem
+credencial, `provider test` retorna `provider.login_required` (a mesma razão de
+`provider status`), nunca `provider.no_credential` (BD02-3):
 
 - **`future`** — a feature não está entregue; não é corrigível pelo usuário
   (`provider.future`). Hoje nenhum provedor cai aqui (o Antigravity saiu desse

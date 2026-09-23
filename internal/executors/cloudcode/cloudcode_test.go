@@ -43,6 +43,19 @@ type openerFunc func(string) ([]byte, error)
 
 func (f openerFunc) Open(s string) ([]byte, error) { return f(s) }
 
+// fakeRefresher records the renewal calls and answers with a scripted
+// credential or error (the BD02-1 point-of-use hook).
+type fakeRefresher struct {
+	calls int
+	err   error
+	fresh contracts.Credential
+}
+
+func (f *fakeRefresher) RefreshCredential(_ context.Context, cred contracts.Credential) (contracts.Credential, error) {
+	f.calls++
+	return f.fresh, f.err
+}
+
 func testDeps(doer contracts.HTTPDoer) contracts.ExecutorDeps {
 	return contracts.ExecutorDeps{
 		Clock:    fakeClock{t: time.Unix(1000, 0)},
@@ -526,6 +539,149 @@ func loopbackExecutor(t *testing.T, srv *httptest.Server, idle time.Duration) *E
 		t.Fatalf("New: %v", err)
 	}
 	return e
+}
+
+// --- point-of-use renewal (BD02-1) ---
+
+// renewedExecutor builds an executor whose opener records WHICH sealed blob
+// was opened, with a fixed clock and a scripted refresher.
+func renewedExecutor(t *testing.T, resp *http.Response, clock fakeClock, ref contracts.CredentialRefresher) (*Executor, *capturedRequest, *[]string) {
+	t.Helper()
+	cap := &capturedRequest{}
+	var opened []string
+	doer := doerFunc(func(r *http.Request) (*http.Response, error) {
+		cap.header = r.Header.Clone()
+		return resp, nil
+	})
+	deps := testDeps(doer)
+	deps.Clock = clock
+	deps.Refresher = ref
+	deps.Secrets = openerFunc(func(s string) ([]byte, error) {
+		opened = append(opened, s)
+		return []byte(`{"access_token":"token-xyz","refresh_token":"refresh-xyz"}`), nil
+	})
+	e := mustExecutor(t, Config{Family: "antigravity", BaseURL: "https://daily-cloudcode-pa.googleapis.com", Descriptor: antigravityDescriptor()}, deps)
+	return e, cap, &opened
+}
+
+// TestExpiredCredentialRenewedAtPointOfUse proves the BD02-1 hook: an OAuth
+// credential at/past expiry is renewed through the Refresher port and the
+// RENEWED sealed blob is the one opened for the request.
+func TestExpiredCredentialRenewedAtPointOfUse(t *testing.T) {
+	now := time.Unix(2000, 0)
+	clock := fakeClock{t: now}
+	ref := &fakeRefresher{fresh: contracts.Credential{
+		ID: "cred-1", Provider: "antigravity", AuthMode: contracts.AuthOAuth,
+		Sealed: []byte("renewed-blob"), ExpiresAt: now.Add(time.Hour),
+	}}
+	e, cap, opened := renewedExecutor(t, geminiResponse("ok"), clock, ref)
+
+	expired := oauthCred()
+	expired.ExpiresAt = now.Add(-time.Minute)
+	if _, err := e.Do(context.Background(), contracts.WireRequest{Body: []byte(`{"model":"m","messages":[]}`), Model: "m"}, expired); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if ref.calls != 1 {
+		t.Fatalf("refresher calls = %d, want 1", ref.calls)
+	}
+	if len(*opened) != 1 || (*opened)[0] != "renewed-blob" {
+		t.Fatalf("opened blobs = %v, want the renewed one", *opened)
+	}
+	if cap.header.Get("Authorization") != "Bearer token-xyz" {
+		t.Fatalf("Authorization = %q", cap.header.Get("Authorization"))
+	}
+}
+
+// TestRefreshFailureFailsOpen proves a failed renewal keeps the stored token:
+// the request proceeds exactly as before the hook existed.
+func TestRefreshFailureFailsOpen(t *testing.T) {
+	now := time.Unix(2000, 0)
+	clock := fakeClock{t: now}
+	ref := &fakeRefresher{err: domain.New(domain.CodeAuthRefreshFailed, domain.WithHTTPStatus(502))}
+	e, _, opened := renewedExecutor(t, geminiResponse("ok"), clock, ref)
+
+	expired := oauthCred()
+	expired.ExpiresAt = now.Add(-time.Minute)
+	if _, err := e.Do(context.Background(), contracts.WireRequest{Body: []byte(`{"model":"m","messages":[]}`), Model: "m"}, expired); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if ref.calls != 1 {
+		t.Fatalf("refresher calls = %d, want 1", ref.calls)
+	}
+	if len(*opened) != 1 || (*opened)[0] != "enc:v1:x:y:z" {
+		t.Fatalf("opened blobs = %v, want the stored one (fail-open)", *opened)
+	}
+}
+
+// TestUnexpiredCredentialSkipsRenewal proves the hook is passive for a valid
+// or open-ended (zero expiry) credential.
+func TestUnexpiredCredentialSkipsRenewal(t *testing.T) {
+	now := time.Unix(2000, 0)
+	clock := fakeClock{t: now}
+
+	t.Run("within validity", func(it *testing.T) {
+		ref := &fakeRefresher{}
+		e, _, opened := renewedExecutor(it, geminiResponse("ok"), clock, ref)
+		valid := oauthCred()
+		valid.ExpiresAt = now.Add(time.Hour)
+		if _, err := e.Do(context.Background(), contracts.WireRequest{Body: []byte(`{"model":"m","messages":[]}`), Model: "m"}, valid); err != nil {
+			t.Fatalf("Do: %v", err)
+		}
+		if ref.calls != 0 || len(*opened) != 1 || (*opened)[0] != "enc:v1:x:y:z" {
+			t.Fatalf("calls=%d opened=%v, want no renewal", ref.calls, *opened)
+		}
+	})
+	t.Run("zero expiry", func(it *testing.T) {
+		ref := &fakeRefresher{}
+		e, _, _ := renewedExecutor(it, geminiResponse("ok"), clock, ref)
+		unknown := oauthCred() // ExpiresAt zero
+		if _, err := e.Do(context.Background(), contracts.WireRequest{Body: []byte(`{"model":"m","messages":[]}`), Model: "m"}, unknown); err != nil {
+			t.Fatalf("Do: %v", err)
+		}
+		if ref.calls != 0 {
+			t.Fatalf("refresher called %d times for a zero-expiry credential", ref.calls)
+		}
+	})
+	t.Run("non oauth", func(it *testing.T) {
+		ref := &fakeRefresher{}
+		e, _, _ := renewedExecutor(it, geminiResponse("ok"), clock, ref)
+		apiKey := oauthCred()
+		apiKey.AuthMode = contracts.AuthAPIKey
+		if _, err := e.Do(context.Background(), contracts.WireRequest{Body: []byte(`{"model":"m","messages":[]}`), Model: "m"}, apiKey); err != nil {
+			t.Fatalf("Do: %v", err)
+		}
+		if ref.calls != 0 {
+			t.Fatalf("refresher called for an api_key credential")
+		}
+	})
+}
+
+// TestOAuthCredentialExpiredTable pins the expiry predicate incl. the leeway
+// band and the zero-expiry "unknown" sentinel.
+func TestOAuthCredentialExpiredTable(t *testing.T) {
+	now := time.Unix(5000, 0)
+	cases := []struct {
+		name    string
+		mode    contracts.AuthMode
+		expires time.Time
+		want    bool
+	}{
+		{"non oauth", contracts.AuthAPIKey, now.Add(-time.Hour), false},
+		{"zero expiry", contracts.AuthOAuth, time.Time{}, false},
+		{"far future", contracts.AuthOAuth, now.Add(time.Hour), false},
+		{"just inside leeway", contracts.AuthOAuth, now.Add(refreshLeeway - time.Second), true},
+		{"just outside leeway", contracts.AuthOAuth, now.Add(refreshLeeway + time.Second), false},
+		{"at expiry", contracts.AuthOAuth, now, true},
+		{"past", contracts.AuthOAuth, now.Add(-time.Minute), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(it *testing.T) {
+			cred := contracts.Credential{AuthMode: tc.mode, ExpiresAt: tc.expires}
+			if got := oauthCredentialExpired(now, cred); got != tc.want {
+				it.Fatalf("expired = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }
 
 // TestNewRejectsBadConfig covers the constructor guards.
