@@ -28,11 +28,28 @@ type contextKey uint8
 const (
 	requestIDKey contextKey = iota
 	traceIDKey
+	clientIDKey
 )
 
 // WithRequestID returns a context carrying the request identifier.
 func WithRequestID(ctx context.Context, id domain.RequestID) context.Context {
 	return context.WithValue(ctx, requestIDKey, id.String())
+}
+
+// WithClientID returns a context carrying the AUTHENTICATED downstream client
+// identity (ADR-SEC-06 §2.5). It is populated by the client-key guard after a
+// successful verification, so downstream code (the gateway's GateInput.Meta)
+// can key per-client state on a value that is NOT the secret and NOT a
+// client-declared header. An unauthenticated request never carries one.
+func WithClientID(ctx context.Context, id domain.ClientID) context.Context {
+	return context.WithValue(ctx, clientIDKey, id.String())
+}
+
+// ClientIDFrom extracts the authenticated client identity, or "" when the
+// request carried no authenticated key.
+func ClientIDFrom(ctx context.Context) string {
+	v, _ := ctx.Value(clientIDKey).(string)
+	return v
 }
 
 // RequestIDFrom extracts the request identifier, or "".

@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/dandgabr/heimdall-core/internal/domain"
 	"github.com/dandgabr/heimdall-core/internal/i18n"
@@ -136,22 +138,60 @@ func envelopeCodeFor(status int) (string, bool) {
 // ManagementAuth guards the /api/mgmt/* surface. It extracts the token from the
 // Authorization header ("Bearer <token>") or the X-Management-Token header and
 // compares it in constant time.
+//
+// A management token is NEVER accepted as a client key, and a client key is
+// never accepted here: this guard only verifies the operator credential
+// (ADR-SEC-06 §2.1). When Throttle is set, FAILED attempts are throttled per
+// client IP (ADR-SEC-06 §4.2) and a success clears the IP's history.
 type ManagementAuth struct {
 	// Verify returns true when the presented token matches the stored one.
 	Verify func(presented string) bool
+	// Throttle, when non-nil, rate-limits failed attempts per client IP.
+	Throttle *LoginThrottle
 }
 
 // Middleware returns the guard.
 func (a ManagementAuth) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ip := ClientIP(r)
+		if a.Throttle != nil && !a.Throttle.Allow(ip) {
+			writeRateLimited(w, r, a.Throttle.RetryAfter(ip))
+			return
+		}
 		token := extractToken(r)
 		if token == "" || a.Verify == nil || !a.Verify(token) {
+			if a.Throttle != nil {
+				a.Throttle.Fail(ip)
+			}
 			WriteError(w, r, domain.New(domain.CodeUnauthorized,
 				domain.WithHTTPStatus(http.StatusUnauthorized)))
 			return
 		}
+		if a.Throttle != nil {
+			a.Throttle.Success(ip)
+		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// ClientIP extracts the peer IP from RemoteAddr ("host:port"), falling back to
+// the raw value. It is used as the throttle key; the port is dropped so two
+// connections from one host share a bucket.
+func ClientIP(r *http.Request) string {
+	return hostOf(r.RemoteAddr)
+}
+
+// writeRateLimited emits the 429 quota.rate_limited envelope with a Retry-After
+// header (ADR-SEC-06 §4.2).
+func writeRateLimited(w http.ResponseWriter, r *http.Request, retryAfter time.Duration) {
+	secs := int(retryAfter.Seconds() + 0.999)
+	if secs < 1 {
+		secs = 1
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(secs))
+	WriteError(w, r, domain.New(domain.CodeQuotaRateLimited,
+		domain.WithHTTPStatus(http.StatusTooManyRequests),
+		domain.WithParams(map[string]string{"retry_after": strconv.Itoa(secs)})))
 }
 
 func extractToken(r *http.Request) string {

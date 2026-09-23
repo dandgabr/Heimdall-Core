@@ -46,6 +46,7 @@ type Config struct {
 	Log           Log
 	Store         Store
 	Features      Features
+	Security      Security
 	Passthrough   Passthrough
 	// Providers is the per-provider upstream configuration (the `[[providers]]`
 	// block). It is file-driven; env can override individual fields via
@@ -150,6 +151,36 @@ func (s Server) IsLoopback() bool {
 		return false
 	}
 	return ip.IsLoopback()
+}
+
+// Security holds the F5.1 HTTP trust settings (ADR-SEC-06): client-key
+// authentication of the inference gateway and the anti-rebinding/CSRF and CORS
+// controls of the local surfaces.
+type Security struct {
+	// RequireClientKey makes the inference gateway (/v1/*) demand an
+	// authenticated client key. The default is FALSE with a documented warning:
+	// the product is a local personal router, and forcing every existing
+	// OpenAI-compatible client to provision a key before the first request
+	// would break the out-of-the-box experience the project promises. With the
+	// flag ON, a request with no key (or an invalid/revoked one) is 401
+	// clientkey.invalid. Operators who expose the gateway beyond loopback MUST
+	// set it (ADR-SEC-06 §6.4: a tunnel/LAN transfers the risk to the operator).
+	RequireClientKey bool
+	// HostAllowlist is the set of EXTRA Host header values accepted in addition
+	// to the built-in loopback forms (127.0.0.1, localhost, [::1], with or
+	// without port). It exists for an allow-remote deployment whose configured
+	// server.host is a name the browser sends verbatim. Empty means only the
+	// loopback forms are accepted.
+	HostAllowlist []string
+	// CORSAllowedOrigins is the closed set of origins allowed to cross-call the
+	// inference gateway (/v1/*). It NEVER includes a wildcard (ADR-SEC-06 §3.3
+	// forbids `*`); an empty list disables CORS entirely. Management and GUI
+	// origins are never cross-origin permissive.
+	CORSAllowedOrigins []string
+	// ManagementLoginRateLimit throttles failed management-token authentication
+	// per client IP (ADR-SEC-06 §4.2): at most Rate failures per Interval, then
+	// a Retry-After cooldown. Zero Rate disables it.
+	ManagementLoginRateLimit RateLimitConfig
 }
 
 // Log holds the structured logger settings.
@@ -347,6 +378,16 @@ func Defaults() Config {
 			Path:      defaultStorePath(),
 			TokenPath: defaultTokenPath(),
 		},
+		// F5.1 defaults are SAFE and USABLE: client-key auth is off (a local
+		// personal router must work out of the box) with a boot warning, no
+		// extra Host/Origin names are trusted, CORS is closed, and the
+		// management login throttle starts from a conservative 5 failures/min.
+		Security: Security{
+			RequireClientKey:         false,
+			HostAllowlist:            nil,
+			CORSAllowedOrigins:       nil,
+			ManagementLoginRateLimit: RateLimitConfig{Rate: 5, Interval: time.Minute},
+		},
 		Features: GatesFeaturesConfig(false),
 		Passthrough: Passthrough{
 			Family:    "openai",
@@ -422,7 +463,40 @@ func (c Config) Validate() error {
 	if err := validateProviders(c.Providers); err != nil {
 		return err
 	}
+	if err := validateSecurity(c.Security); err != nil {
+		return err
+	}
 	return validateGates(c.Features.Gates)
+}
+
+// validateSecurity enforces the F5.1 HTTP trust shape (ADR-SEC-06). It is
+// fail-closed on the one value that could silently widen the attack surface:
+// a CORS wildcard. Everything else is a conservative shape check.
+func validateSecurity(s Security) error {
+	for _, origin := range s.CORSAllowedOrigins {
+		if strings.TrimSpace(origin) == "*" {
+			return configProviderError("cors_allowed_origins must not contain a wildcard",
+				map[string]string{"value": origin})
+		}
+		// An origin is scheme://host[:port]; reject a bare host or a path so a
+		// malformed entry cannot be interpreted loosely.
+		if !strings.HasPrefix(origin, "http://") && !strings.HasPrefix(origin, "https://") {
+			return configProviderError("cors_allowed_origins entries must be full origins",
+				map[string]string{"value": origin})
+		}
+	}
+	for _, host := range s.HostAllowlist {
+		if strings.TrimSpace(host) == "" {
+			return configProviderError("host_allowlist must not contain an empty entry", nil)
+		}
+	}
+	if s.ManagementLoginRateLimit.Rate < 0 {
+		return configProviderError("negative security.management_login_rate_limit.rate", nil)
+	}
+	if s.ManagementLoginRateLimit.Rate > 0 && s.ManagementLoginRateLimit.Interval <= 0 {
+		return configProviderError("management_login_rate_limit.rate set without a positive interval", nil)
+	}
+	return nil
 }
 
 // validateGates enforces the shape of the gate parameter blocks (fail-closed:

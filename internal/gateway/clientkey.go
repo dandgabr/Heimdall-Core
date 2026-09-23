@@ -2,26 +2,26 @@ package gateway
 
 import (
 	"net/http"
-	"strings"
+
+	"github.com/dandgabr/heimdall-core/internal/observability"
 )
 
-// This file resolves the G-1 finding of the F4 validation: the stateful gates
-// (the rate limiter, the memory gates) key their state on a client identity
-// that no HTTP boundary provided. The gateway is the boundary that talks to
-// the client, so it is the one that extracts the identity the request ALREADY
-// presents and hands it to the gates through GateInput.Meta.
+// This file resolves the G-1 finding of the F4 validation and lands the F5
+// client-identity contract (ADR-SEC-06 §2).
 //
-// Honesty about what this is NOT: with client authentication landing in F5
-// (BD-01/P1-6), the extracted key is a CLIENT-DECLARED identity, unverified.
-// It is good enough for best-effort separation of throttle buckets and memory
-// namespaces; it is NOT an authentication decision, and a client can present
-// different keys per request (each key simply gets its own bucket/namespace).
-// The F5 contract will replace this with an authenticated key.
+// In F4 the gateway extracted a CLIENT-DECLARED identity straight from the
+// request headers. That was honest best-effort separation of throttle buckets
+// and memory namespaces, but it was NOT authentication: a client could present
+// any string, and a management token was as good as a key.
 //
-// Privacy: the key lives only in the request-scoped Meta map. The stateful
-// gates derive a SHA-256 namespace (memory) or an in-memory map index
-// (throttle) from it; no gate logs it, the logger gate sees header NAMES only,
-// and the central redactor guards every diagnostic surface.
+// F5 makes the CANONICAL source the AUTHENTICATED client key: the client-key
+// middleware (internal/api/middleware) verifies the presented key (hash,
+// constant-time, revoked-aware) and injects a NON-SECRET domain.ClientID into
+// the request context. The gateway reads that identity — never the raw header —
+// and hands it to the stateful gates through GateInput.Meta. A request with no
+// authenticated identity leaves the Meta key ABSENT (the documented shared
+// bucket / inert memory namespace); the gateway never invents one and never
+// falls back to an unverified header.
 
 // ClientKeyMeta is the GateInput.Meta key the stateful gates read. It mirrors
 // the security and memory families' reserved boundary key (security.MetaKeyClient
@@ -30,27 +30,13 @@ import (
 // by the parity the propagation tests prove.
 const ClientKeyMeta = "client.key"
 
-// ClientKeyFromHeaders extracts the client identity a request presents,
-// preferring the OpenAI-compatible form (Authorization: Bearer <key>) and
-// falling back to the Anthropic-style dedicated header (X-API-Key).
-//
-// Absence rules: no identity headers at all, a non-Bearer Authorization
-// scheme, or a Bearer header with an empty token all yield "" — the caller
-// leaves the Meta key ABSENT rather than inventing a value. A present-but-
-// malformed Authorization deliberately does NOT fall through to X-API-Key:
-// the client declared an identity form and failed to provide it, which the
-// gates treat exactly like absence.
-func ClientKeyFromHeaders(h http.Header) string {
-	if auth := strings.TrimSpace(h.Get("Authorization")); auth != "" {
-		if token, ok := strings.CutPrefix(auth, "Bearer "); ok {
-			if token = strings.TrimSpace(token); token != "" {
-				return token
-			}
-		}
-		return "" // declared an Authorization that carries no usable key
+// ClientKeyFromContext returns the AUTHENTICATED client identity the client-key
+// middleware injected after verifying the presented key, or "" when the request
+// carried none. The value is a non-secret ClientID; the plaintext key never
+// reaches this layer.
+func ClientKeyFromContext(r *http.Request) string {
+	if r == nil {
+		return ""
 	}
-	if key := strings.TrimSpace(h.Get("X-API-Key")); key != "" {
-		return key
-	}
-	return ""
+	return observability.ClientIDFrom(r.Context())
 }

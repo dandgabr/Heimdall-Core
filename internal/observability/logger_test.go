@@ -46,6 +46,17 @@ func TestLoggerInjectsRequestAndTraceIDs(t *testing.T) {
 	}
 }
 
+// TestClientIDContextAccessors covers the F5.1 authenticated-client accessors.
+func TestClientIDContextAccessors(t *testing.T) {
+	if got := ClientIDFrom(context.Background()); got != "" {
+		t.Errorf("empty context = %q, want empty", got)
+	}
+	ctx := WithClientID(context.Background(), domain.ClientID("client-9"))
+	if got := ClientIDFrom(ctx); got != "client-9" {
+		t.Errorf("ClientIDFrom = %q, want client-9", got)
+	}
+}
+
 func TestParseLevel(t *testing.T) {
 	tests := map[string]string{
 		"debug": "DEBUG",

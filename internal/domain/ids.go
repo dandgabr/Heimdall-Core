@@ -13,6 +13,12 @@ type ProviderID string
 // CredentialID identifies one stored account/credential of a provider family.
 type CredentialID string
 
+// ClientID identifies one downstream client key issued for the inference
+// gateway (/v1/*). It is the NON-SECRET identity the boundary injects after
+// authenticating a client key (ADR-SEC-06 §2.5); the key's plaintext never
+// leaves the authentication step.
+type ClientID string
+
 // ComboID identifies a named, persisted routing combo.
 type ComboID string
 
@@ -36,3 +42,4 @@ func NewCredentialID() CredentialID {
 func (r RequestID) String() string    { return string(r) }
 func (c CredentialID) String() string { return string(c) }
 func (p ProviderID) String() string   { return string(p) }
+func (c ClientID) String() string     { return string(c) }

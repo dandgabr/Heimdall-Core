@@ -1,100 +1,94 @@
 package gateway
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/dandgabr/heimdall-core/internal/contracts"
+	"github.com/dandgabr/heimdall-core/internal/domain"
+	"github.com/dandgabr/heimdall-core/internal/observability"
 )
 
-// TestClientKeyFromHeaders pins the extraction contract: the presented
-// identity is honoured (Bearer first, then the dedicated header), every
-// malformed shape counts as ABSENT, and no invented value ever comes back.
-func TestClientKeyFromHeaders(t *testing.T) {
-	cases := []struct {
-		name   string
-		auth   string
-		apiKey string
-		want   string
-	}{
-		{"bearer", "Bearer sk-client-key-1", "", "sk-client-key-1"},
-		{"bearer extra spaces", "Bearer   sk-key  ", "", "sk-key"},
-		{"dedicated header", "", "sk-api-key-2", "sk-api-key-2"},
-		{"no headers at all", "", "", ""},
-		{"empty everything", " ", " ", ""},
-		{"non-bearer scheme", "Basic dXNlcjpwYXNz", "", ""},
-		{"bearer without token", "Bearer ", "", ""},
-		{"bearer only scheme word", "Bearer", "", ""},
-		{"bare value without scheme", "sk-raw-value", "", ""},
-		{"bearer wins over dedicated", "Bearer sk-primary", "sk-fallback", "sk-primary"},
+// TestClientKeyFromContext pins the F5 contract: the client identity the
+// gateway hands to the gates comes from the AUTHENTICATED context the
+// client-key middleware populated, never from a request header. An absent
+// identity yields "" — no invented value.
+func TestClientKeyFromContext(t *testing.T) {
+	if got := ClientKeyFromContext(&http.Request{}); got != "" {
+		t.Fatalf("no context = %q, want empty", got)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			h := http.Header{}
-			if tc.auth != "" {
-				h.Set("Authorization", tc.auth)
-			}
-			if tc.apiKey != "" {
-				h.Set("X-API-Key", tc.apiKey)
-			}
-			if got := ClientKeyFromHeaders(h); got != tc.want {
-				t.Fatalf("got %q, want %q", got, tc.want)
-			}
-		})
+	if got := ClientKeyFromContext(nil); got != "" {
+		t.Fatalf("nil request = %q, want empty", got)
+	}
+
+	req := (&http.Request{}).WithContext(
+		observability.WithClientID(context.Background(), domain.ClientID("client-abc")))
+	if got := ClientKeyFromContext(req); got != "client-abc" {
+		t.Fatalf("authenticated context = %q, want client-abc", got)
 	}
 }
 
-// chatWithHeaders drives a chat request carrying custom identity headers
-// through the mounted route.
-func chatWithHeaders(t *testing.T, h *Handler, auth, apiKey string) *httptest.ResponseRecorder {
-	t.Helper()
-	mux := http.NewServeMux()
-	h.Register(mux)
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
-		strings.NewReader(`{"model":"m","stream":true,"messages":[]}`))
-	if auth != "" {
-		req.Header.Set("Authorization", auth)
-	}
-	if apiKey != "" {
-		req.Header.Set("X-API-Key", apiKey)
-	}
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-	return rec
-}
-
-// TestChatPropagatesClientKeyToGateInput proves the boundary hands the
-// presented identity to the chain's Meta (the stateful gates' key source),
-// and leaves the key ABSENT when the request presents none — no invented
-// value, not even an empty string.
-func TestChatPropagatesClientKeyToGateInput(t *testing.T) {
+// TestChatPropagatesAuthenticatedClientKeyToGateInput proves the boundary hands
+// the AUTHENTICATED identity (from the request context) to the chain's Meta —
+// the stateful gates' key source — and leaves the key ABSENT when the request
+// carries no authenticated identity.
+func TestChatPropagatesAuthenticatedClientKeyToGateInput(t *testing.T) {
 	cases := []struct {
 		name        string
-		auth        string
-		apiKey      string
+		clientID    string
 		wantPresent bool
-		wantKey     string
 	}{
-		{"bearer key propagates", "Bearer sk-live-1", "", true, "sk-live-1"},
-		{"api key propagates", "", "sk-api-2", true, "sk-api-2"},
-		{"no identity stays absent", "", "", false, ""},
-		{"malformed stays absent", "Basic xxx", "", false, ""},
+		{"authenticated identity propagates", "client-1", true},
+		{"no authentication stays absent", "", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			chain := &fakeChain{pre: contracts.Decision{Kind: contracts.DecisionContinue}}
 			h := newHandler(&fakeResolver{plan: samplePlan()}, &fakeDispatcher{stream: &memStream{chunks: []contracts.Chunk{{Data: []byte("x")}}}}, nil, chain)
-			chatWithHeaders(t, h, tc.auth, tc.apiKey)
+			chatWithClientID(h, tc.clientID)
 
 			got, present := chain.preMeta[ClientKeyMeta]
 			if present != tc.wantPresent {
 				t.Fatalf("present = %v, want %v", present, tc.wantPresent)
 			}
-			if present && got != tc.wantKey {
-				t.Fatalf("key = %q, want %q", got, tc.wantKey)
+			if present && got != tc.clientID {
+				t.Fatalf("key = %q, want %q", got, tc.clientID)
 			}
 		})
 	}
+}
+
+// TestChatIgnoresUnverifiedClientHeader proves the raw header no longer keys
+// the gates: with no authenticated context, a presented Authorization header
+// must not surface as the Meta client key. This is the G-1 regression guard.
+func TestChatIgnoresUnverifiedClientHeader(t *testing.T) {
+	chain := &fakeChain{pre: contracts.Decision{Kind: contracts.DecisionContinue}}
+	h := newHandler(&fakeResolver{plan: samplePlan()}, &fakeDispatcher{stream: &memStream{chunks: []contracts.Chunk{{Data: []byte("x")}}}}, nil, chain)
+
+	mux := http.NewServeMux()
+	h.Register(mux)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"m","stream":true,"messages":[]}`))
+	req.Header.Set("Authorization", "Bearer sk-unverified")
+	mux.ServeHTTP(httptest.NewRecorder(), req)
+
+	if _, present := chain.preMeta[ClientKeyMeta]; present {
+		t.Fatal("an unverified header must not populate the client.key meta")
+	}
+}
+
+// chatWithClientID drives a chat request whose context carries an authenticated
+// client identity (or none when clientID is empty).
+func chatWithClientID(h *Handler, clientID string) {
+	mux := http.NewServeMux()
+	h.Register(mux)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"m","stream":true,"messages":[]}`))
+	if clientID != "" {
+		req = req.WithContext(observability.WithClientID(req.Context(), domain.ClientID(clientID)))
+	}
+	mux.ServeHTTP(httptest.NewRecorder(), req)
 }

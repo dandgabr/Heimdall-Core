@@ -159,11 +159,14 @@ func (h *Handler) chat(w http.ResponseWriter, r *http.Request) {
 		Headers:   headerNamesOnly(r.Header),
 		Meta:      map[string]string{"http.path": r.URL.Path},
 	}
-	// The client identity the request PRESENTS (never validated here — that is
-	// F5/BD-01) keys the stateful gates: the rate limiter's per-key bucket and
-	// the memory namespace (ADR-SEC-07 §3). Absent identity stays absent: no
-	// gate may invent a shared identity for the client.
-	if key := ClientKeyFromHeaders(r.Header); key != "" {
+	// The AUTHENTICATED client identity keys the stateful gates: the rate
+	// limiter's per-key bucket and the memory namespace (ADR-SEC-07 §3). It is
+	// injected by the client-key middleware (F5, ADR-SEC-06 §2.5) — NOT read
+	// from a client-declared header, which was the pre-authentication G-1
+	// behaviour. Absent identity stays absent: no gate may invent a shared
+	// identity, and the rate limiter falls back to its documented shared bucket
+	// while the memory gates stay inert.
+	if key := ClientKeyFromContext(r); key != "" {
 		gateIn.Meta[ClientKeyMeta] = key
 	}
 	// The body is delivered ONLY when a gate declared it needs it (ADR-SEC-03

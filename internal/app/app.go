@@ -61,8 +61,17 @@ type App struct {
 	// and no KEK is configured: a fresh install must boot without a key.
 	Secrets     *secret.Store
 	Credentials *store.CredentialStore
-	Providers   *providers.Registry
-	Flows       *auth.FlowFactory
+	// ClientKeys persists the downstream client keys of the inference gateway
+	// (F5.1, ADR-SEC-06 §2). Hash-only, like the management token.
+	ClientKeys *store.ClientKeyStore
+	// loginThrottle is the per-IP failed-auth throttle of the management API
+	// (ADR-SEC-06 §4.2). It is built ONCE (in wireVault) and shared by every
+	// Handler() call, so its bucket state survives across requests — a
+	// per-Handler instance would reset the counter on every call and never
+	// throttle. A test may set it before calling Handler().
+	loginThrottle *middleware.LoginThrottle
+	Providers     *providers.Registry
+	Flows         *auth.FlowFactory
 	// Gates is the frozen gate chain, wired with the F1 logger gate.
 	Gates *pipeline.Chain
 	// GateOrder is the per-stage order the gate registry computed at boot
@@ -238,6 +247,22 @@ func Build(opts Options) (*App, error) {
 		descriptor: auth.Descriptor,
 	}
 
+	// The ADR-SEC-06 §6.2 startup warnings. They are OBSERVABILITY, not
+	// refusals: the operator deliberately chose the exposure (config.Validate
+	// already required the explicit allow_remote opt-in), and the point is that
+	// the posture is never silent.
+	if cfg.Server.AllowRemote {
+		logger.Warn(bundle.Format(i18n.DefaultLanguage,
+			domain.CodeStartupWarningRemoteAccess, nil))
+	}
+	// With the gateway reachable from more than loopback, an unauthenticated
+	// /v1/* is a real risk (any local or LAN process can spend paid quota).
+	// Warn when remote access is on and client-key auth is off.
+	if cfg.Server.AllowRemote && !cfg.Security.RequireClientKey {
+		logger.Warn("security.require_client_key is false while allow_remote is on; " +
+			"the inference gateway is unauthenticated on the network")
+	}
+
 	// Build the F1 vault layer. The rule is precise:
 	//
 	//   - a FRESH vault (no credentials) boots WITHOUT a KEK: requiring a key
@@ -274,6 +299,12 @@ func (a *App) wireVault(opts Options) error {
 	logger := a.Logger
 
 	a.Credentials = store.NewCredentialStore(st)
+	a.ClientKeys = store.NewClientKeyStore(st)
+	a.loginThrottle = middleware.NewLoginThrottle(
+		a.Config.Security.ManagementLoginRateLimit.Rate,
+		a.Config.Security.ManagementLoginRateLimit.Interval,
+		nil,
+	)
 
 	// The provider registry is always available: listing providers needs no key.
 	//
@@ -1350,7 +1381,8 @@ func (a *App) Handler() http.Handler {
 
 	openai.New(a.Bundle).Register(mux)
 	mgmt.New(middleware.ManagementAuth{
-		Verify: a.Store.VerifyManagementToken,
+		Verify:   a.Store.VerifyManagementToken,
+		Throttle: a.loginThrottle,
 	}).Register(mux)
 
 	// The F3 gateway owns POST /v1/chat/completions: it routes through the
@@ -1403,10 +1435,42 @@ func (a *App) Handler() http.Handler {
 		}
 	}
 
+	// F5.1 HTTP trust guards (ADR-SEC-06 §3), all CATCH-ALL over the mux so a
+	// route registered later is protected by construction:
+	//
+	//   CORS        — closed cross-origin policy for /v1/* (never a wildcard);
+	//   OriginGuard — anti-CSRF for mutating management/GUI requests;
+	//   ClientAuth  — client-key auth of mutating /v1/* routes;
+	//   HostGuard   — anti-DNS-rebinding for EVERY route.
+	//
+	// HostGuard is outermost so an unacceptable Host is refused before any of
+	// the others run (the same "before authentication" rule LocalOnly follows);
+	// ClientAuth runs before the observer's chain pass so the authenticated
+	// ClientID is already on the context when the gateway reads it. None of
+	// these is per-route: the classification lives INSIDE each guard, keyed on
+	// the path/method, which is what keeps a new /v1/* route protected without
+	// an edit here.
+	if a.ClientKeys != nil {
+		handler = middleware.ClientAuth(a.verifyClientKey, a.Config.Security.RequireClientKey)(handler)
+	}
+	handler = middleware.OriginGuard(a.Config.Security.CORSAllowedOrigins)(handler)
+	handler = middleware.CORS(a.Config.Security.CORSAllowedOrigins)(handler)
+	handler = middleware.HostGuard(a.Config.Security.HostAllowlist)(handler)
+
 	handler = middleware.LocalOnly(handler)
 	handler = middleware.RequestID(domain.NewRequestID)(handler)
 	handler = middleware.Recoverer(a.Logger)(handler)
 	return handler
+}
+
+// verifyClientKey adapts the client-key store to the middleware verifier,
+// binding the request context so a DB read honours cancellation.
+func (a *App) verifyClientKey(ctx context.Context, presented string) (domain.ClientID, bool) {
+	rec, ok := a.ClientKeys.Verify(ctx, presented)
+	if !ok {
+		return "", false
+	}
+	return rec.ID, true
 }
 
 // GateRecords returns a DEEP COPY of the metadata records the logger gate has
@@ -1477,6 +1541,43 @@ func (a *App) Close() error {
 // RotateManagementToken generates a new token, persists only its hash and writes
 // the plaintext to the configured 0600 file exactly once. It returns the file
 // path so the CLI can report it without ever handling the secret itself.
+// ClientKeyVerifier is the App-level client-key verifier the middleware uses.
+// It is exposed as a method so the composition root can pass a value bound to
+// the store without leaking the store type into the middleware package.
+
+// CreateClientKey issues a new client key, storing only its hash, and returns
+// the non-secret record plus the plaintext key EXACTLY ONCE. The caller (the
+// CLI) prints the key and never persists it.
+func (a *App) CreateClientKey(ctx context.Context, label string) (store.ClientKey, string, error) {
+	if a.ClientKeys == nil {
+		return store.ClientKey{}, "", domain.New(domain.CodeInternal,
+			domain.WithHTTPStatus(500),
+			domain.WithParams(map[string]string{"reason": "client key store not wired"}))
+	}
+	return a.ClientKeys.Create(ctx, label)
+}
+
+// ListClientKeys returns every client key's non-secret metadata, oldest first.
+func (a *App) ListClientKeys(ctx context.Context) ([]store.ClientKey, error) {
+	if a.ClientKeys == nil {
+		return nil, domain.New(domain.CodeInternal,
+			domain.WithHTTPStatus(500),
+			domain.WithParams(map[string]string{"reason": "client key store not wired"}))
+	}
+	return a.ClientKeys.List(ctx)
+}
+
+// RevokeClientKey soft-deletes a client key by id. An unknown id is
+// clientkey.not_found; an already-revoked id succeeds idempotently.
+func (a *App) RevokeClientKey(ctx context.Context, id domain.ClientID) error {
+	if a.ClientKeys == nil {
+		return domain.New(domain.CodeInternal,
+			domain.WithHTTPStatus(500),
+			domain.WithParams(map[string]string{"reason": "client key store not wired"}))
+	}
+	return a.ClientKeys.Revoke(ctx, id)
+}
+
 func (a *App) RotateManagementToken() (tokenPath string, err error) {
 	token, _, err := a.Store.RotateManagementToken()
 	if err != nil {

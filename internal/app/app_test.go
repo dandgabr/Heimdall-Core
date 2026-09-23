@@ -72,6 +72,7 @@ func TestHealthAndModels(t *testing.T) {
 	t.Run("health", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/health", nil)
 		req.RemoteAddr = "127.0.0.1:1234"
+		req.Host = "127.0.0.1"
 		rec := httptest.NewRecorder()
 		a.Handler().ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
@@ -85,6 +86,7 @@ func TestHealthAndModels(t *testing.T) {
 	t.Run("models empty list", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 		req.RemoteAddr = "127.0.0.1:1234"
+		req.Host = "127.0.0.1"
 		rec := httptest.NewRecorder()
 		a.Handler().ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
@@ -103,6 +105,7 @@ func TestMgmtPingRequiresToken(t *testing.T) {
 	t.Run("no token", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/mgmt/ping", nil)
 		req.RemoteAddr = "127.0.0.1:1234"
+		req.Host = "127.0.0.1"
 		rec := httptest.NewRecorder()
 		a.Handler().ServeHTTP(rec, req)
 		if rec.Code != http.StatusUnauthorized {
@@ -113,6 +116,7 @@ func TestMgmtPingRequiresToken(t *testing.T) {
 	t.Run("with token", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/mgmt/ping", nil)
 		req.RemoteAddr = "127.0.0.1:1234"
+		req.Host = "127.0.0.1"
 		req.Header.Set("Authorization", "Bearer "+token)
 		rec := httptest.NewRecorder()
 		a.Handler().ServeHTTP(rec, req)
@@ -214,6 +218,7 @@ func TestMuxErrorsUseI18nEnvelope(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			req := httptest.NewRequest(tt.method, tt.path, nil)
 			req.RemoteAddr = "127.0.0.1:1234"
+			req.Host = "127.0.0.1"
 			rec := httptest.NewRecorder()
 			a.Handler().ServeHTTP(rec, req)
 
@@ -265,6 +270,7 @@ func TestEmptyVaultBootsWithoutKey(t *testing.T) {
 	// Health still answers.
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	req.RemoteAddr = "127.0.0.1:1234"
+	req.Host = "127.0.0.1"
 	rec := httptest.NewRecorder()
 	instance.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -665,6 +671,7 @@ func TestHandlerRegistersPassthroughWhenConfigured(t *testing.T) {
 	// the POST route is mounted rather than 404.
 	req := httptest.NewRequest(http.MethodGet, "/v1/chat/completions", nil)
 	req.RemoteAddr = "127.0.0.1:1234"
+	req.Host = "127.0.0.1"
 	rec := httptest.NewRecorder()
 	a.Handler().ServeHTTP(rec, req)
 	if rec.Code == http.StatusNotFound {
@@ -694,6 +701,7 @@ func TestHandlerRefusesInsecurePassthrough(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
 	req.RemoteAddr = "127.0.0.1:1234"
+	req.Host = "127.0.0.1"
 	rec := httptest.NewRecorder()
 	a.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
@@ -708,6 +716,7 @@ func TestHandlerSkipsObserverWhenGatesNil(t *testing.T) {
 	a.Gates = nil
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	req.RemoteAddr = "127.0.0.1:1234"
+	req.Host = "127.0.0.1"
 	rec := httptest.NewRecorder()
 	a.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -877,6 +886,7 @@ func TestGateLoggerRunsInRequestPath(t *testing.T) {
 	const secret = "SUPER-SECRET-TOKEN"
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	req.RemoteAddr = "127.0.0.1:1234"
+	req.Host = "127.0.0.1"
 	req.Header.Set("Authorization", "Bearer "+secret)
 	req.Header.Set("Cookie", "session="+secret)
 	req.Header.Set("X-Management-Token", secret)
@@ -1384,6 +1394,7 @@ func TestBuildTokenGateEngineDisable(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
 		strings.NewReader("{\n \"model\":\"m\",\n \"messages\":[]\n}"))
 	req.RemoteAddr = "127.0.0.1:1234"
+	req.Host = "127.0.0.1"
 	instance.Handler().ServeHTTP(rec, req)
 	// No provider is configured, so the request errors after the gate; the
 	// assertion is simply that the build succeeded with the engine disabled.
@@ -1469,6 +1480,7 @@ func TestHandlerNilChainStillServes(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	req.RemoteAddr = "127.0.0.1:1234"
+	req.Host = "127.0.0.1"
 	a.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("health = %d, want 200", rec.Code)
@@ -1680,6 +1692,7 @@ func TestHandlerObserverErrorBranchWarns(t *testing.T) {
 		// Handler must still be usable (the error is only logged).
 		req := httptest.NewRequest(http.MethodGet, "/health", nil)
 		req.RemoteAddr = "127.0.0.1:1234"
+		req.Host = "127.0.0.1"
 		rec := httptest.NewRecorder()
 		a.Handler().ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
@@ -1839,7 +1852,9 @@ func TestHandlerConcurrentRequestsNoRace(t *testing.T) {
 			defer wg.Done()
 			<-start // release all goroutines together to maximise contention
 			req := httptest.NewRequest(http.MethodGet, "/health", nil)
-			req.RemoteAddr = "127.0.0.1:1234" // loopback so LocalOnly admits it
+			req.RemoteAddr = "127.0.0.1:1234"
+			req.Host = "127.0.0.1"
+			req.Host = "127.0.0.1" // loopback so LocalOnly admits it
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, req)
 			if rec.Code != http.StatusOK {

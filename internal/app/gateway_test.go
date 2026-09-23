@@ -59,6 +59,7 @@ func gatewayRequest(t *testing.T, a *App, body string) *httptest.ResponseRecorde
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 	req.RemoteAddr = "127.0.0.1:1234"
+	req.Host = "127.0.0.1"
 	rec := httptest.NewRecorder()
 	a.Handler().ServeHTTP(rec, req)
 	return rec

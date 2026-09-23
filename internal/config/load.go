@@ -167,20 +167,23 @@ func flagLayer(flags map[string]string) map[string]string {
 // error-prone. HEIMDALL_CONFIG is intentionally absent: it selects the file, it
 // is not a value.
 var envKeyMap = map[string]string{
-	"HEIMDALL_SERVER_HOST":             "server.host",
-	"HEIMDALL_SERVER_PORT":             "server.port",
-	"HEIMDALL_SERVER_ALLOW_REMOTE":     "server.allow_remote",
-	"HEIMDALL_LOG_LEVEL":               "log.level",
-	"HEIMDALL_LOG_FORMAT":              "log.format",
-	"HEIMDALL_STORE_PATH":              "store.path",
-	"HEIMDALL_STORE_TOKEN_PATH":        "store.token_path",
-	"HEIMDALL_FEATURES_GATES_TOKEN":    "features.gates.token",
-	"HEIMDALL_FEATURES_GATES_MEMORY":   "features.gates.memory",
-	"HEIMDALL_FEATURES_GATES_SECURITY": "features.gates.security",
-	"HEIMDALL_PASSTHROUGH_FAMILY":      "passthrough.family",
-	"HEIMDALL_PASSTHROUGH_BASE_URL":    "passthrough.base_url",
-	"HEIMDALL_PASSTHROUGH_API_KEY":     "passthrough.api_key",
-	"HEIMDALL_PASSTHROUGH_API_KEY_ENV": "passthrough.api_key_env",
+	"HEIMDALL_SERVER_HOST":                   "server.host",
+	"HEIMDALL_SERVER_PORT":                   "server.port",
+	"HEIMDALL_SERVER_ALLOW_REMOTE":           "server.allow_remote",
+	"HEIMDALL_LOG_LEVEL":                     "log.level",
+	"HEIMDALL_LOG_FORMAT":                    "log.format",
+	"HEIMDALL_STORE_PATH":                    "store.path",
+	"HEIMDALL_STORE_TOKEN_PATH":              "store.token_path",
+	"HEIMDALL_FEATURES_GATES_TOKEN":          "features.gates.token",
+	"HEIMDALL_FEATURES_GATES_MEMORY":         "features.gates.memory",
+	"HEIMDALL_FEATURES_GATES_SECURITY":       "features.gates.security",
+	"HEIMDALL_SECURITY_REQUIRE_CLIENT_KEY":   "security.require_client_key",
+	"HEIMDALL_SECURITY_HOST_ALLOWLIST":       "security.host_allowlist",
+	"HEIMDALL_SECURITY_CORS_ALLOWED_ORIGINS": "security.cors_allowed_origins",
+	"HEIMDALL_PASSTHROUGH_FAMILY":            "passthrough.family",
+	"HEIMDALL_PASSTHROUGH_BASE_URL":          "passthrough.base_url",
+	"HEIMDALL_PASSTHROUGH_API_KEY":           "passthrough.api_key",
+	"HEIMDALL_PASSTHROUGH_API_KEY_ENV":       "passthrough.api_key_env",
 }
 
 // envLayer maps a supported HEIMDALL_* variable to its config key. Unknown
@@ -344,6 +347,10 @@ func set(cfg *Config, key, value string) error {
 		if ok, err := setSecurityGateParam(cfg, key, value); ok {
 			return err
 		}
+		// The F5.1 HTTP trust block (ADR-SEC-06).
+		if ok, err := setHTTPSecurityParam(cfg, key, value); ok {
+			return err
+		}
 		// A `[[providers]]` entry flattens to providers.<i>.<field>.
 		if idx, field, ok := parseProviderKey(key); ok {
 			return setProvider(cfg, idx, field, value)
@@ -405,6 +412,36 @@ func setMemoryGateParam(cfg *Config, key, value string) (bool, error) {
 		return true, setIntParam(key, value, func(n int) { m.Embeddings.Dim = n })
 	}
 	return false, nil
+}
+
+// setHTTPSecurityParam applies one security.* key of the F5.1 HTTP trust block
+// (ADR-SEC-06). List values are comma-separated (the same representation
+// splitList produces from a TOML string array).
+func setHTTPSecurityParam(cfg *Config, key, value string) (bool, error) {
+	const prefix = "security."
+	if !strings.HasPrefix(key, prefix) {
+		return false, nil
+	}
+	sec := &cfg.Security
+	switch key {
+	case prefix + "require_client_key":
+		b, err := parseBool(value)
+		if err != nil {
+			return true, badValue(key, value)
+		}
+		sec.RequireClientKey = b
+	case prefix + "host_allowlist":
+		sec.HostAllowlist = splitList(value)
+	case prefix + "cors_allowed_origins":
+		sec.CORSAllowedOrigins = splitList(value)
+	case prefix + "management_login_rate_limit.rate":
+		return true, setIntParam(key, value, func(n int) { sec.ManagementLoginRateLimit.Rate = n })
+	case prefix + "management_login_rate_limit.interval":
+		return true, setDurationParam(key, value, func(d time.Duration) { sec.ManagementLoginRateLimit.Interval = d })
+	default:
+		return false, nil
+	}
+	return true, nil
 }
 
 // setSecurityGateParam applies one features.gates.security.* parameter key.

@@ -71,9 +71,10 @@ func TestLatestMigrationCreatesSchema(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("schema_version missing: %v", err)
 	}
-	// The latest embedded migration is 0005_memory. A new migration bumps this.
-	if version != "5" {
-		t.Fatalf("schema_version = %q, want 5", version)
+	// The latest embedded migration is 0006_client_keys. A new migration bumps
+	// this.
+	if version != "6" {
+		t.Fatalf("schema_version = %q, want 6", version)
 	}
 
 	// Idempotence: a second Migrate must not change anything.
@@ -95,6 +96,7 @@ func TestLatestMigrationCreatesSchema(t *testing.T) {
 		{"quota_windows", "credential_id"},
 		{"usage_attempts", "attempt_key"},
 		{"memories", "id"},
+		{"client_keys", "id"},
 	} {
 		rows, err := st.read.Query(`SELECT ` + tc.column + ` FROM ` + tc.table)
 		if err != nil {

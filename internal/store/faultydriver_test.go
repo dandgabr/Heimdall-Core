@@ -82,6 +82,25 @@ type faultDriverConfig struct {
 	memoryBadExpires bool
 	// memoryRowsErr makes the memory search yield one clean row then error.
 	memoryRowsErr bool
+	// clientKeyRow makes a client_keys SELECT return one valid 5-column row
+	// (the lookup query), so a test reaches the code past a successful read.
+	clientKeyRow bool
+	// clientKeyListRow makes a client_keys SELECT return one valid 4-column row
+	// (the list query).
+	clientKeyListRow bool
+	// clientKeyOneColRow makes a client_keys SELECT return a 1-column row, so
+	// the multi-destination scan fails.
+	clientKeyOneColRow bool
+	// clientKeyRowsErr makes a client_keys SELECT yield one clean row then
+	// error, so rows.Err() is non-nil.
+	clientKeyRowsErr bool
+	// clientKeyBadCreated / clientKeyBadRevoked make the lookup row carry an
+	// unparsable timestamp.
+	clientKeyBadCreated bool
+	clientKeyBadRevoked bool
+	// clientKeyExists makes the "SELECT 1 FROM client_keys WHERE id = ?" read
+	// return one row, so an idempotent revoke reports the key exists.
+	clientKeyExists bool
 }
 
 type faultConnector struct{ cfg faultDriverConfig }
@@ -223,6 +242,29 @@ func (c *faultConn) QueryContext(_ context.Context, q string, args []driver.Name
 		}
 		if c.cfg.usageRow {
 			return &oneUsageRow{}, nil
+		}
+	}
+	// The client-key existence probe (SELECT 1 ...) is distinguished from the
+	// row-returning queries by its "SELECT 1" prefix.
+	if strings.Contains(q, "SELECT 1 FROM client_keys") {
+		if c.cfg.clientKeyExists {
+			return &oneRow{value: "1"}, nil
+		}
+		return &emptyRows{}, nil
+	}
+	// A client_keys SELECT reaches the scan/parse/rowsErr branches.
+	if strings.Contains(q, "FROM client_keys") {
+		if c.cfg.clientKeyRowsErr {
+			return &clientKeyRowsErrRows{}, nil
+		}
+		if c.cfg.clientKeyOneColRow {
+			return &oneRow{value: "x"}, nil
+		}
+		if c.cfg.clientKeyListRow {
+			return &oneClientKeyListRow{}, nil
+		}
+		if c.cfg.clientKeyRow || c.cfg.clientKeyBadCreated || c.cfg.clientKeyBadRevoked {
+			return &oneClientKeyRow{badCreated: c.cfg.clientKeyBadCreated, badRevoked: c.cfg.clientKeyBadRevoked}, nil
 		}
 	}
 	return &emptyRows{}, nil
@@ -495,6 +537,79 @@ func (r *oneMemoryRow) Next(dest []driver.Value) error {
 		dest[5] = "2026-09-23T12:00:00Z"
 	}
 	return nil
+}
+
+// oneClientKeyRow yields a single valid 5-column client_keys row (the lookup
+// query shape: id, label, created_at, revoked_at, key_hash). It can carry a
+// malformed timestamp.
+type oneClientKeyRow struct {
+	done                   bool
+	badCreated, badRevoked bool
+}
+
+func (r *oneClientKeyRow) Columns() []string {
+	return []string{"id", "label", "created_at", "revoked_at", "key_hash"}
+}
+func (r *oneClientKeyRow) Close() error { return nil }
+func (r *oneClientKeyRow) Next(dest []driver.Value) error {
+	if r.done {
+		return io.EOF
+	}
+	r.done = true
+	dest[0] = "ck-1"
+	dest[1] = "editor"
+	if r.badCreated {
+		dest[2] = "not-a-time"
+	} else {
+		dest[2] = "2026-09-22T12:00:00Z"
+	}
+	if r.badRevoked {
+		dest[3] = "not-a-time"
+	} else {
+		dest[3] = ""
+	}
+	dest[4] = "abc123hash"
+	return nil
+}
+
+// oneClientKeyListRow yields a single valid 4-column client_keys row (the list
+// query shape: id, label, created_at, revoked_at).
+type oneClientKeyListRow struct{ done bool }
+
+func (r *oneClientKeyListRow) Columns() []string {
+	return []string{"id", "label", "created_at", "revoked_at"}
+}
+func (r *oneClientKeyListRow) Close() error { return nil }
+func (r *oneClientKeyListRow) Next(dest []driver.Value) error {
+	if r.done {
+		return io.EOF
+	}
+	r.done = true
+	dest[0] = "ck-1"
+	dest[1] = "editor"
+	dest[2] = "2026-09-22T12:00:00Z"
+	dest[3] = ""
+	return nil
+}
+
+// clientKeyRowsErrRows yields one valid client_keys row then errors on the next
+// Next call.
+type clientKeyRowsErrRows struct{ step int }
+
+func (r *clientKeyRowsErrRows) Columns() []string {
+	return []string{"id", "label", "created_at", "revoked_at"}
+}
+func (r *clientKeyRowsErrRows) Close() error { return nil }
+func (r *clientKeyRowsErrRows) Next(dest []driver.Value) error {
+	if r.step == 0 {
+		r.step++
+		dest[0] = "ck-1"
+		dest[1] = "editor"
+		dest[2] = "2026-09-22T12:00:00Z"
+		dest[3] = ""
+		return nil
+	}
+	return errInjected
 }
 
 // memoryRowsErrRows yields one valid memory row then errors on the next Next.

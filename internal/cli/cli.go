@@ -113,7 +113,7 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.AddCommand(newServeCmd(), newVersionCmd(), newTokenCmd(), newProviderCmd(), newComboCmd())
+	root.AddCommand(newServeCmd(), newVersionCmd(), newTokenCmd(), newClientKeyCmd(), newProviderCmd(), newComboCmd())
 	return root
 }
 
@@ -241,8 +241,119 @@ func newTokenRotateCmd() *cobra.Command {
 	return cmd
 }
 
-// newProviderCmd groups the read/management provider commands. None of them
-// performs network I/O: `list` and `status` only inspect the registry and the
+// newClientKeyCmd groups the downstream client-key commands (F5.1,
+// ADR-SEC-06 §2). A client key authenticates the inference gateway (/v1/*) and
+// is a different credential class from the management token. `create` prints
+// the plaintext key exactly once (like `token rotate` writes its file); the
+// value is never logged and never printed again.
+func newClientKeyCmd() *cobra.Command {
+	key := &cobra.Command{
+		Use:   "client-key",
+		Short: "Manage downstream client keys for the inference gateway (/v1/*)",
+	}
+	key.AddCommand(newClientKeyCreateCmd(), newClientKeyListCmd(), newClientKeyRevokeCmd())
+	return key
+}
+
+func newClientKeyCreateCmd() *cobra.Command {
+	var (
+		configPath string
+		label      string
+	)
+	cmd := &cobra.Command{
+		Use:   "create",
+		Short: "Issue a new client key (printed once, stored only as a hash)",
+		Long: "Issue a new client key for the inference gateway (/v1/*).\n\n" +
+			"The plaintext key is printed ONCE and never persisted: the vault keeps\n" +
+			"only its SHA-256 hash, exactly like the management token. Store it now;\n" +
+			"it cannot be recovered.\n\n" +
+			"    heimdall client-key create --label editor",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			instance, err := buildReadOnly(configPath)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = instance.Close() }()
+
+			rec, plaintext, err := instance.CreateClientKey(cmd.Context(), label)
+			if err != nil {
+				return err
+			}
+			// Line 1: the non-secret metadata (id, label). Line 2: the KEY,
+			// and only the key, so a script can capture it without parsing. It
+			// never goes through the catalog or the logger.
+			if _, err := fmt.Fprintf(cmd.OutOrStdout(), "%s\tlabel=%s\n",
+				rec.ID, rec.Label); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(cmd.OutOrStdout(), plaintext)
+			return err
+		},
+	}
+	cmd.Flags().StringVar(&configPath, "config", "", "path to the TOML configuration file")
+	cmd.Flags().StringVar(&label, "label", "", "human label for the key")
+	return cmd
+}
+
+func newClientKeyListCmd() *cobra.Command {
+	var configPath string
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List client keys (id/label/state only; never the key)",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			instance, err := buildReadOnly(configPath)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = instance.Close() }()
+
+			list, err := instance.ListClientKeys(cmd.Context())
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			for _, k := range list {
+				state := "active"
+				if !k.RevokedAt.IsZero() {
+					state = "revoked"
+				}
+				if _, err := fmt.Fprintf(out, "%s\tlabel=%s\t%s\n",
+					k.ID, k.Label, state); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&configPath, "config", "", "path to the TOML configuration file")
+	return cmd
+}
+
+func newClientKeyRevokeCmd() *cobra.Command {
+	var configPath string
+	cmd := &cobra.Command{
+		Use:   "revoke <id>",
+		Short: "Revoke a client key by id (the key stops authenticating immediately)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			instance, err := buildReadOnly(configPath)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = instance.Close() }()
+
+			if err := instance.RevokeClientKey(cmd.Context(), domain.ClientID(args[0])); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(cmd.OutOrStdout(), args[0])
+			return err
+		},
+	}
+	cmd.Flags().StringVar(&configPath, "config", "", "path to the TOML configuration file")
+	return cmd
+}
+
+// newProviderCmd groups the read/management provider commands. None of them// performs network I/O: `list` and `status` only inspect the registry and the
 // descriptors, and `import` reads local files (read-only) into the vault.
 func newProviderCmd() *cobra.Command {
 	provider := &cobra.Command{

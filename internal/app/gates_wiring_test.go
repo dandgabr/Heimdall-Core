@@ -233,6 +233,7 @@ func chatRequestPOST(t *testing.T, a *App, body string) *httptest.ResponseRecord
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 	req.RemoteAddr = "127.0.0.1:1234"
+	req.Host = "127.0.0.1"
 	rec := httptest.NewRecorder()
 	a.Handler().ServeHTTP(rec, req)
 	return rec
@@ -510,21 +511,32 @@ func TestMemoryEventSinkRecordsAndCaps(t *testing.T) {
 	}
 }
 
-// TestGateRateLimitPerClientKeyThroughGateway is the G-1 integration: the
-// gateway now derives the client key from the presented Authorization header,
-// so two DIFFERENT keys get independent buckets (both pass at rate=1) while
-// the SAME key exhausts its bucket (second request 429), and a keyless
-// request lands in the documented SHARED bucket. The key value never reaches
-// the log.
+// TestGateRateLimitPerClientKeyThroughGateway is the F5.1 integration of the
+// G-1 fix: a client key is now AUTHENTICATED (created in the vault, presented as
+// a bearer, verified by the middleware), so two DIFFERENT keys get independent
+// buckets (both pass at rate=1) while the SAME key exhausts its bucket (second
+// request 429), and a keyless request lands in the documented SHARED bucket.
+// An UNVERIFIED header no longer keys the gates — it is not authentication.
+// No key value ever reaches the log.
 func TestGateRateLimitPerClientKeyThroughGateway(t *testing.T) {
 	a, logBuf := wireTestApp(t, func(c *config.Config) {
 		c.Features.Gates.Security = true
 		c.Features.Gates.SecurityParams.RateLimit = config.RateLimitConfig{Rate: 1, Interval: time.Minute}
 	})
+	// Issue two real client keys. CreateClientKey returns the plaintext once.
+	_, plainA, err := a.CreateClientKey(context.Background(), "client-a")
+	if err != nil {
+		t.Fatalf("CreateClientKey A: %v", err)
+	}
+	_, plainB, err := a.CreateClientKey(context.Background(), "client-b")
+	if err != nil {
+		t.Fatalf("CreateClientKey B: %v", err)
+	}
 	chatWithKey := func(key string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
 			strings.NewReader(`{"model":"no-such-model","messages":[{"role":"user","content":"hi"}]}`))
 		req.RemoteAddr = "127.0.0.1:1234"
+		req.Host = "127.0.0.1"
 		if key != "" {
 			req.Header.Set("Authorization", "Bearer "+key)
 		}
@@ -533,13 +545,13 @@ func TestGateRateLimitPerClientKeyThroughGateway(t *testing.T) {
 		return rec
 	}
 
-	if rec := chatWithKey("sk-client-a"); rec.Code == http.StatusTooManyRequests {
+	if rec := chatWithKey(plainA); rec.Code == http.StatusTooManyRequests {
 		t.Fatalf("first request of client A throttled: %s", rec.Body.String())
 	}
-	if rec := chatWithKey("sk-client-a"); rec.Code != http.StatusTooManyRequests {
+	if rec := chatWithKey(plainA); rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("client A second request = %d, want 429 (same bucket)", rec.Code)
 	}
-	if rec := chatWithKey("sk-client-b"); rec.Code == http.StatusTooManyRequests {
+	if rec := chatWithKey(plainB); rec.Code == http.StatusTooManyRequests {
 		t.Fatal("client B shared client A's bucket: per-key isolation broken")
 	}
 	// Keyless requests share ONE bucket: the first passes, the second throttles.
@@ -551,7 +563,7 @@ func TestGateRateLimitPerClientKeyThroughGateway(t *testing.T) {
 	}
 
 	// The presented keys never reached the structured log.
-	for _, key := range []string{"sk-client-a", "sk-client-b"} {
+	for _, key := range []string{plainA, plainB} {
 		if strings.Contains(logBuf.String(), key) {
 			t.Fatalf("the client key %q leaked into the log", key)
 		}

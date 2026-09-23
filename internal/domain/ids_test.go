@@ -42,3 +42,11 @@ func TestProviderIDString(t *testing.T) {
 		t.Errorf("ProviderID.String() = %q", p)
 	}
 }
+
+// TestClientIDString covers the F5.1 client identity type.
+func TestClientIDString(t *testing.T) {
+	c := ClientID("client-1")
+	if c.String() != "client-1" {
+		t.Errorf("ClientID.String() = %q", c)
+	}
+}

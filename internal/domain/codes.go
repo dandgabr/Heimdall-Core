@@ -178,4 +178,43 @@ const (
 	CodeStartupShutdown      = "startup.shutdown"
 	CodeTokenRotationOK      = "api.mgmt.token_rotated"
 	CodeManagementAuthFailed = "api.mgmt.token_invalid"
+
+	// clientkey.* — the F5 client-key authentication of the inference gateway
+	// (/v1/*, ADR-SEC-06 §2). The code is deliberately named "clientkey" so a
+	// rejected client key is never confused with the management token
+	// (api.mgmt.token_invalid) on either side of the separation of privilege.
+	//
+	//   - CodeClientKeyInvalid: absent, malformed, unknown or revoked client
+	//     key. ScopeRequest, 401: the request must never cool down a credential
+	//     and never leaks whether the key existed. This is the code the F5.1
+	//     task specifies for the gateway's 401.
+	CodeClientKeyInvalid = "clientkey.invalid"
+	// CodeClientKeyStoreFailed: a client-key persistence failure (DB error).
+	CodeClientKeyStoreFailed = "clientkey.store_failed"
+	// CodeClientKeyNotFound: the id passed to `client-key revoke` does not
+	// exist. It carries {id} so the operator sees which id was wrong.
+	CodeClientKeyNotFound = "clientkey.not_found"
+	// CodeClientKeyCreated is the success line of `client-key create`; it
+	// carries {id} and {label} only — the key itself is printed on its own line
+	// by the CLI, never through the catalog or the logger.
+	CodeClientKeyCreated = "api.clientkey.created"
+	// CodeClientKeyRevoked is the success line of `client-key revoke` ({id}).
+	CodeClientKeyRevoked = "api.clientkey.revoked"
+
+	// server.* — anti-DNS-rebinding and anti-CSRF (ADR-SEC-06 §3). Both are
+	// ScopeRequest and 403: the caller is a browser-driven or rebinding request
+	// whose Host/Origin is not a local origin, refused before routing.
+	//
+	//   - CodeServerHostInvalid: the Host header is not on the loopback/local
+	//     allowlist (a public name or a rebinding domain such as
+	//     127.0.0.1.nip.io).
+	//   - CodeServerOriginInvalid: a mutating request's Origin/Referer is not a
+	//     local origin (anti-CSRF).
+	CodeServerHostInvalid   = "server.host_invalid"
+	CodeServerOriginInvalid = "server.origin_invalid"
+
+	// CodeStartupWarningRemoteAccess is the WARN log emitted when the operator
+	// deliberately binds a non-loopback address (ADR-SEC-06 §6.2). It is a log
+	// message, not an HTTP error: the process keeps running.
+	CodeStartupWarningRemoteAccess = "startup.remote_access_warning"
 )
