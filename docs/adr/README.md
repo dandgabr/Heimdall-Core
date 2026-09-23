@@ -149,6 +149,17 @@ implementadores citam no código — são registradas aqui.
 > do token de gestão (ambos hash-only, constant-time compare), defesas contra DNS rebinding
 > (validação de `Host`) e anti-CSRF (validação de `Origin`/`Referer`, CORS fechado).
 
+### Bloqueiam a F6
+
+| ADR | Título | Status | Data | Arquivo |
+| --- | --- | --- | --- | --- |
+| **SEC-09** | Cadeia de suprimentos e release | Aceita | 2026-09-23 | [`sec-09-supply-chain-release.md`](sec-09-supply-chain-release.md) |
+
+> **ADR-SEC-09 é a base de integridade e empacotamento da F6.** Ela rege a compilação
+> estática determinística (`CGO_ENABLED=0`, `-trimpath`), auditoria de vulnerabilidades
+> via `govulncheck`, geração de SBOM no padrão CycloneDX, manifestos de integridade SHA-256
+> e assinatura digital via `cosign` (com fallback SLSA documentado).
+
 ### Aceitas por fase
 
 | ADR | Título | Bloqueia | Status |
@@ -169,6 +180,7 @@ implementadores citam no código — são registradas aqui.
 | 0014 | [DAG de gates e política de falha por gate](0014-dag-de-gates-e-politica-de-falha.md) | F4 | Aceita |
 | 0015 | [Preservação de prompt cache (`cacheImpact`, prefix-freeze)](0015-preservacao-de-prompt-cache.md) | F4 | Aceita |
 | SEC-06 | [Modelo de confiança da Management API](sec-06-management-api-trust.md) | F5 | Aceita |
+| SEC-09 | [Cadeia de suprimentos e release](sec-09-supply-chain-release.md) | F6 | Aceita |
 
 ### Previstas (ainda não escritas)
 
@@ -184,5 +196,5 @@ Mantidas aqui para reservar o número e evitar colisão. Cada uma deve existir
 | 0006 | Protocolo de streaming/SSE canônico | F2 |
 | 0007 | Compatibilidade OpenAI (subset explícito) | F2 |
 | 0008 | Orçamentos de timeout e retry | F2 |
-| SEC-09 | Supply chain e release | F6 |
+
 
