@@ -80,6 +80,37 @@ func (c *ComboStore) Update(ctx context.Context, combo combos.Combo) error {
 	return c.write(ctx, combo, false)
 }
 
+// Save creates or replaces a combo and returns the PERSISTED combo with the
+// derived Depth set. It is the management API's entry point: unlike Create
+// (duplicate is an error) it upserts, and unlike a separate Get after a write it
+// returns the value directly, so the caller never performs a second read whose
+// only possible outcome is the row it just wrote.
+//
+// Validation runs BEFORE the write, so an invalid combo never reaches the
+// database; Depth is the value ValidateGraph computed, not a re-derivation.
+func (c *ComboStore) Save(ctx context.Context, combo combos.Combo) (combos.Combo, error) {
+	if combo.SchemaVer == 0 {
+		combo.SchemaVer = combos.CurrentSchema
+	}
+	if combo.ID == "" {
+		combo.ID = domain.ComboID(combo.Name)
+	}
+	_, getErr := c.Get(ctx, combo.ID)
+	insert := errors.Is(getErr, combosNotFound())
+	if !insert && getErr != nil {
+		return combos.Combo{}, getErr
+	}
+	depth, err := c.validate(ctx, combo, !insert)
+	if err != nil {
+		return combos.Combo{}, err
+	}
+	combo.Depth = depth
+	if err := c.write(ctx, combo, insert); err != nil {
+		return combos.Combo{}, err
+	}
+	return combo, nil
+}
+
 // validate runs the pure combo validation with the currently stored combos and
 // the injected provider allowlist.
 func (c *ComboStore) validate(ctx context.Context, combo combos.Combo, update bool) (int, error) {

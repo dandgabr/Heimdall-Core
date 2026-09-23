@@ -160,8 +160,9 @@ func newServeCmd() *cobra.Command {
 			}
 
 			instance, err := app.Build(app.Options{
-				Config: cfg,
-				Env:    environ(),
+				Config:  cfg,
+				Env:     environ(),
+				Version: Version,
 			})
 			if err != nil {
 				return err
@@ -219,7 +220,7 @@ func newTokenRotateCmd() *cobra.Command {
 				return err
 			}
 
-			instance, err := app.Build(app.Options{Config: cfg, Env: environ()})
+			instance, err := app.Build(app.Options{Config: cfg, Env: environ(), Version: Version})
 			if err != nil {
 				return err
 			}
@@ -824,7 +825,7 @@ func buildReadOnly(configPath string) (*app.App, error) {
 	if err != nil {
 		return nil, err
 	}
-	return app.Build(app.Options{Config: cfg, Env: environ()})
+	return app.Build(app.Options{Config: cfg, Env: environ(), Version: Version})
 }
 
 // environ snapshots the process environment. It is a separate function so

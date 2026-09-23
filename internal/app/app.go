@@ -80,14 +80,24 @@ type App struct {
 	GateOrder gates.Order
 
 	// F3 routing layer.
-	Combos     *store.ComboStore
-	Router     *router.Resolver
-	Breaker    *breaker.Breaker
-	QuotaRec   *quota.Recorder
-	QuotaFilt  *quota.Filter
+	Combos    *store.ComboStore
+	Router    *router.Resolver
+	Breaker   *breaker.Breaker
+	QuotaRec  *quota.Recorder
+	QuotaFilt *quota.Filter
+	// QuotaStore is the durable quota/usage persistence. It is also the read
+	// path for the management API's usage rollup (AggregateUsage), which sums
+	// the idempotent attempt log on demand.
+	QuotaStore *store.QuotaStore
 	Dispatcher *dispatcher.Dispatcher
 	// Gateway is the minimal inference handler (POST /v1/chat/completions).
 	Gateway *gateway.Handler
+
+	// F5.2 management surface state.
+	// version is the build version reported by GET /api/mgmt/status.
+	version string
+	// startedAt is the boot instant; uptime is derived from it.
+	startedAt time.Time
 
 	env    map[string]string
 	server *http.Server
@@ -119,6 +129,9 @@ type Options struct {
 	// FlowDeps overrides the OAuth client dependencies (HTTP client, clock).
 	// Production leaves it zero; tests inject an httptest-backed client.
 	FlowDeps *oauth.ClientDeps
+	// Version is the build version reported by the management API and the CLI.
+	// Empty falls back to "dev" so a build without -ldflags still reports one.
+	Version string
 }
 
 // appSeams groups the injectable construction steps Build performs. Production
@@ -238,6 +251,10 @@ func Build(opts Options) (*App, error) {
 			map[string]string{"path": cfg.Store.TokenPath}))
 	}
 
+	version := opts.Version
+	if version == "" {
+		version = "dev"
+	}
 	app := &App{
 		Config:     cfg,
 		Store:      st,
@@ -245,6 +262,8 @@ func Build(opts Options) (*App, error) {
 		Bundle:     bundle,
 		env:        opts.Env,
 		descriptor: auth.Descriptor,
+		version:    version,
+		startedAt:  time.Now(),
 	}
 
 	// The ADR-SEC-06 §6.2 startup warnings. They are OBSERVABILITY, not
@@ -760,6 +779,9 @@ type APIKeyResult struct {
 	// Upserted is true when an existing credential for this provider+label was
 	// replaced (idempotent re-add), false when a new one was created.
 	Upserted bool
+	// CreatedAt is when the stored row was written, so a caller (the management
+	// API) can render the credential view without a second read.
+	CreatedAt time.Time
 }
 
 // AddAPIKey seals a plaintext API key and stores it in the vault for provider id.
@@ -844,7 +866,7 @@ func (a *App) AddAPIKey(ctx context.Context, id domain.ProviderID, label, key st
 	if err := a.Credentials.Upsert(ctx, cred); err != nil {
 		return APIKeyResult{}, err
 	}
-	return APIKeyResult{Provider: id, CredentialID: credID, Label: label, Upserted: existed}, nil
+	return APIKeyResult{Provider: id, CredentialID: credID, Label: label, Upserted: existed, CreatedAt: time.Now().UTC()}, nil
 }
 
 // apiKeySealer is the narrow seal port add-key needs. *secret.Store satisfies
@@ -1223,7 +1245,8 @@ func (a *App) wireRouting() error {
 
 	catalog := providers.NewCatalog(a.Providers)
 	quotaCfg := quota.DefaultConfig(systemClock{})
-	a.QuotaRec = quota.NewRecorder(store.NewQuotaStore(a.Store), quotaCfg)
+	a.QuotaStore = store.NewQuotaStore(a.Store)
+	a.QuotaRec = quota.NewRecorder(a.QuotaStore, quotaCfg)
 	a.QuotaFilt = quota.NewFilter(a.QuotaRec, quotaCfg)
 	a.Breaker = breaker.New(systemClock{})
 
@@ -1380,10 +1403,14 @@ func (a *App) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	openai.New(a.Bundle).Register(mux)
+	// The management API is built over the App's own adapter: every /api/mgmt/
+	// route (the whole subtree) requires the management token, mounted as ONE
+	// authenticated sub-mux so a route added later inherits the guard by
+	// construction (ADR-SEC-06 §1.2).
 	mgmt.New(middleware.ManagementAuth{
 		Verify:   a.Store.VerifyManagementToken,
 		Throttle: a.loginThrottle,
-	}).Register(mux)
+	}, a.NewManagementService()).Register(mux)
 
 	// The F3 gateway owns POST /v1/chat/completions: it routes through the
 	// Router, executes through the Dispatcher and runs the GateChain. The legacy
@@ -1579,12 +1606,31 @@ func (a *App) RevokeClientKey(ctx context.Context, id domain.ClientID) error {
 }
 
 func (a *App) RotateManagementToken() (tokenPath string, err error) {
-	token, _, err := a.Store.RotateManagementToken()
+	_, _, err = a.rotateManagementTokenValue()
 	if err != nil {
 		return "", err
 	}
-	if err := store.WriteTokenFile(a.Config.Store.TokenPath, token); err != nil {
-		return "", err
-	}
 	return a.Config.Store.TokenPath, nil
+}
+
+// RotateManagementTokenValue rotates the management token and returns the new
+// plaintext EXACTLY ONCE, alongside the path it was written to. It is the
+// management-API path: the CLI uses RotateManagementToken (path only) so its
+// output never has to handle the secret. The plaintext is never logged.
+func (a *App) RotateManagementTokenValue() (token, tokenPath string, err error) {
+	return a.rotateManagementTokenValue()
+}
+
+// rotateManagementTokenValue is the shared implementation: rotate, persist the
+// hash (inside RotateManagementToken), write the 0600 token file, return the
+// plaintext. The plaintext exists only in this call's return.
+func (a *App) rotateManagementTokenValue() (token, tokenPath string, err error) {
+	token, _, err = a.Store.RotateManagementToken()
+	if err != nil {
+		return "", "", err
+	}
+	if err := store.WriteTokenFile(a.Config.Store.TokenPath, token); err != nil {
+		return "", "", err
+	}
+	return token, a.Config.Store.TokenPath, nil
 }

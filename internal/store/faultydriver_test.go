@@ -101,6 +101,20 @@ type faultDriverConfig struct {
 	// clientKeyExists makes the "SELECT 1 FROM client_keys WHERE id = ?" read
 	// return one row, so an idempotent revoke reports the key exists.
 	clientKeyExists bool
+	// usageAggTotal makes the aggregate total query return one valid 4-column
+	// row; usageAggGroup does the same for the GROUP BY query (5 columns);
+	// usageAggOneColRow makes either return a short row; usageAggRowsErr makes
+	// the GROUP BY query yield one row then error.
+	usageAggTotal     bool
+	usageAggGroup     bool
+	usageAggOneColRow bool
+	usageAggRowsErr   bool
+	// usageAggGroupOneCol makes ONLY the GROUP BY query return a short row (the
+	// total succeeds), so the group-scan branch is reachable on its own.
+	usageAggGroupOneCol bool
+	// usageAggSecondGroupErr makes only the SECOND GROUP BY call (by credential)
+	// return an error, so AggregateUsage's by-credential error branch runs.
+	usageAggSecondGroupErr bool
 }
 
 type faultConnector struct{ cfg faultDriverConfig }
@@ -117,6 +131,9 @@ func (faultDriver) Open(string) (driver.Conn, error) { return &faultConn{}, nil 
 type faultConn struct {
 	cfg       faultDriverConfig
 	execCount int
+	// aggGroupCount counts the GROUP BY aggregate queries, so only the SECOND
+	// one can be made to fail (reaching the by-credential error branch).
+	aggGroupCount int
 }
 
 func (c *faultConn) Prepare(string) (driver.Stmt, error) { return nil, driver.ErrSkip }
@@ -237,6 +254,33 @@ func (c *faultConn) QueryContext(_ context.Context, q string, args []driver.Name
 	}
 	// A usage_attempts SELECT gets one valid 7-column row for GetAttempt.
 	if strings.Contains(q, "FROM usage_attempts") {
+		// The aggregate queries are distinguished by their shape: the total has
+		// no GROUP BY; the grouped one has GROUP BY.
+		if strings.Contains(q, "GROUP BY") {
+			c.aggGroupCount++
+			if c.cfg.usageAggSecondGroupErr && c.aggGroupCount == 2 {
+				return nil, errInjected
+			}
+			if c.cfg.usageAggRowsErr {
+				return &usageAggRowsErr{}, nil
+			}
+			if c.cfg.usageAggGroupOneCol {
+				return &oneRow{value: "x"}, nil
+			}
+			if c.cfg.usageAggOneColRow {
+				return &oneRow{value: "x"}, nil
+			}
+			if c.cfg.usageAggGroup {
+				return &usageAggRows{}, nil
+			}
+		} else if strings.Contains(q, "SUM(") {
+			if c.cfg.usageAggOneColRow {
+				return &oneRow{value: "x"}, nil
+			}
+			if c.cfg.usageAggTotal {
+				return &oneUsageAggTotalRow{}, nil
+			}
+		}
 		if c.cfg.usageOneColRow {
 			return &oneRow{value: "x"}, nil
 		}
@@ -438,6 +482,65 @@ func (r *quotaRowsErr) Next(dest []driver.Value) error {
 		dest[3] = ""
 		dest[4] = int64(0)
 		dest[5] = "2026-09-22T12:00:00Z"
+		return nil
+	}
+	return errInjected
+}
+
+// oneUsageAggTotalRow yields a single valid 4-column aggregate total row.
+type oneUsageAggTotalRow struct{ done bool }
+
+func (r *oneUsageAggTotalRow) Columns() []string {
+	return []string{"tokens", "requests", "cost_micros", "count"}
+}
+func (r *oneUsageAggTotalRow) Close() error { return nil }
+func (r *oneUsageAggTotalRow) Next(dest []driver.Value) error {
+	if r.done {
+		return io.EOF
+	}
+	r.done = true
+	dest[0] = int64(300)
+	dest[1] = int64(3)
+	dest[2] = int64(21)
+	dest[3] = int64(3)
+	return nil
+}
+
+// usageAggRows yields one valid 5-column GROUP BY row then EOF.
+type usageAggRows struct{ done bool }
+
+func (r *usageAggRows) Columns() []string {
+	return []string{"key", "tokens", "requests", "cost_micros", "count"}
+}
+func (r *usageAggRows) Close() error { return nil }
+func (r *usageAggRows) Next(dest []driver.Value) error {
+	if r.done {
+		return io.EOF
+	}
+	r.done = true
+	dest[0] = "z.ai"
+	dest[1] = int64(300)
+	dest[2] = int64(3)
+	dest[3] = int64(21)
+	dest[4] = int64(3)
+	return nil
+}
+
+// usageAggRowsErr yields one valid GROUP BY row then errors on the next Next.
+type usageAggRowsErr struct{ step int }
+
+func (r *usageAggRowsErr) Columns() []string {
+	return []string{"key", "tokens", "requests", "cost_micros", "count"}
+}
+func (r *usageAggRowsErr) Close() error { return nil }
+func (r *usageAggRowsErr) Next(dest []driver.Value) error {
+	if r.step == 0 {
+		r.step++
+		dest[0] = "z.ai"
+		dest[1] = int64(1)
+		dest[2] = int64(1)
+		dest[3] = int64(0)
+		dest[4] = int64(1)
 		return nil
 	}
 	return errInjected

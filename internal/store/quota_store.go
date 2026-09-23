@@ -197,3 +197,78 @@ func quotaStoreError(op string, err error) error {
 		domain.WithParams(map[string]string{"reason": "quota " + op + ": " + err.Error()}),
 	)
 }
+
+// UsageRollup is one aggregate row over the durable usage-attempt log. Key is
+// the grouping value ("total", a provider id or a credential id). It carries
+// only numbers — never a secret.
+type UsageRollup struct {
+	Key        string
+	Tokens     int64
+	Requests   int64
+	CostMicros int64
+	Attempts   int64
+}
+
+// AggregateUsage rolls the durable usage-attempt log up into the total plus
+// per-provider and per-credential sums, on READ. There is deliberately no
+// materialized rollup table: the attempt log is small, local and idempotent by
+// AttemptKey (ADR-0011 §4), so summing on demand keeps one source of truth and
+// avoids a second thing to keep consistent. The management API documents that
+// this is a scan, not a live counter.
+//
+// Rows are ordered by key so the response is deterministic. An empty log
+// returns a zero total and empty (non-nil) slices, never an error.
+func (q *QuotaStore) AggregateUsage(ctx context.Context) (UsageRollup, []UsageRollup, []UsageRollup, error) {
+	total, err := q.usageTotal(ctx)
+	if err != nil {
+		return UsageRollup{}, nil, nil, err
+	}
+	byProvider, err := q.usageGrouped(ctx, "provider_id")
+	if err != nil {
+		return UsageRollup{}, nil, nil, err
+	}
+	byCred, err := q.usageGrouped(ctx, "credential_id")
+	if err != nil {
+		return UsageRollup{}, nil, nil, err
+	}
+	return total, byProvider, byCred, nil
+}
+
+func (q *QuotaStore) usageTotal(ctx context.Context) (UsageRollup, error) {
+	row := q.store.read.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(tokens), 0), COALESCE(SUM(requests), 0),
+		       COALESCE(SUM(cost_micros), 0), COUNT(*)
+		FROM usage_attempts`)
+	var r UsageRollup
+	r.Key = "total"
+	if err := row.Scan(&r.Tokens, &r.Requests, &r.CostMicros, &r.Attempts); err != nil {
+		return UsageRollup{}, quotaStoreError("usage total", err)
+	}
+	return r, nil
+}
+
+// usageGrouped runs the GROUP BY over one column. column is a trusted literal
+// chosen by the caller (never user input), so it is safe to interpolate.
+func (q *QuotaStore) usageGrouped(ctx context.Context, column string) ([]UsageRollup, error) {
+	rows, err := q.store.read.QueryContext(ctx, `
+		SELECT `+column+`, COALESCE(SUM(tokens), 0), COALESCE(SUM(requests), 0),
+		       COALESCE(SUM(cost_micros), 0), COUNT(*)
+		FROM usage_attempts GROUP BY `+column+` ORDER BY `+column+` ASC`)
+	if err != nil {
+		return nil, quotaStoreError("usage group", err)
+	}
+	defer rows.Close()
+
+	out := []UsageRollup{}
+	for rows.Next() {
+		var r UsageRollup
+		if err := rows.Scan(&r.Key, &r.Tokens, &r.Requests, &r.CostMicros, &r.Attempts); err != nil {
+			return nil, quotaStoreError("usage group scan", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, quotaStoreError("usage group rows", err)
+	}
+	return out, nil
+}

@@ -14,7 +14,7 @@ const testToken = "management-token-value"
 
 func newTestMux(verify middleware.ManagementAuth) *http.ServeMux {
 	mux := http.NewServeMux()
-	New(verify).Register(mux)
+	New(verify, nil).Register(mux)
 	return mux
 }
 
