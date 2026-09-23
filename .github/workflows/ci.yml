@@ -122,3 +122,75 @@ jobs:
           name: heimdall-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/*
           if-no-files-found: warn
+
+  release:
+    name: release (gates · dist reprodutível · SBOM · checksums)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # O job de release não escreve no repositório. `id-token` habilita a
+    # assinatura keyless do cosign; `attestations` habilita a proveniência SLSA
+    # (passo preparado, comentado abaixo). Nenhum dos dois é usado fora de tag.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      CGO_ENABLED: "0"
+      # SBOM determinístico e pinado: cyclonedx-gomod por `go run`. Não
+      # instalamos syft/cosign por `curl | sh` — binário externo não pinado é
+      # risco de supply chain (ADR-SEC-09). O fallback `go run` basta no runner.
+      SBOM_TOOL: cdxgomod
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Histórico completo: `git describe` deriva a VERSION embutida no
+          # binário, que precisa ser a mesma entre builds para haver
+          # reprodutibilidade.
+          fetch-depth: 0
+
+      - name: Setup Go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            go.mod
+
+      - name: Instalar ferramentas de gate (staticcheck, govulncheck)
+        run: |
+          go install "honnef.co/go/tools/cmd/staticcheck@${STATICCHECK_VERSION}"
+          go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      # Roda os gates (vet, staticcheck, race+cobertura, govulncheck), gera os
+      # binários amd64/arm64, prova a reprodutibilidade (dois builds limpos com
+      # SHA-256 idêntico), gera o SBOM CycloneDX, os checksums e verifica tudo.
+      - name: Gate de release (make release-check)
+        run: make release-check
+
+      # Assinatura keyless (OIDC). `make sign` NÃO falha se o cosign não estiver
+      # no runner: imprime as instruções de assinatura/verificação e segue —
+      # a ausência é a dívida D-SEC-09-01 (docs/SECURITY-DEBT.md).
+      - name: Assinar checksums com cosign (keyless/OIDC) — se disponível
+        run: make sign
+
+      # Fallback obrigatório da ADR-SEC-09 §3.3: proveniência SLSA Build Level 2
+      # pelo GitHub. Habilitar quando o repositório publicar releases por tag
+      # (a ação exige repo público ou GH Enterprise; por isso fica preparada e
+      # inativa). Substitui a assinatura cosign quando o OIDC não está ligado.
+      # - name: Atestação de proveniência de build (SLSA)
+      #   if: ${{ startsWith(github.ref, 'refs/tags/') }}
+      #   uses: actions/attest-build-provenance@v2
+      #   with:
+      #     subject-path: dist/*
+
+      - name: Publicar artefatos de release
+        if: ${{ !cancelled() && hashFiles('dist/**') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dist
+          path: dist/*
+          if-no-files-found: error

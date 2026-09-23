@@ -22,6 +22,12 @@ A versão é injetada no símbolo que o produto expõe para isso
 `-ldflags "-X <VERSION_PKG>.Version=<VERSION>"`. A data do build não é embutida
 de propósito: carimbá-la tornaria o binário irreprodutível bit-a-bit.
 
+Os binários de release são **reprodutíveis bit-a-bit** (ADR-SEC-09 §4): o build
+usa `-trimpath` (sem caminhos absolutos do host), `-buildvcs=false` (sem o
+pseudoversion/timestamp do git nem `vcs.modified`) e `-s -w`; nada de
+`CGO_ENABLED=0` é relaxado. Com `VERSION` fixada, o mesmo fonte produz o mesmo
+SHA-256 — `make dist-verify` comprova com dois builds de cópias limpas.
+
 Versões das ferramentas de análise pinadas em `STATICCHECK_VERSION` e
 `GOVULNCHECK_VERSION` (as mesmas do CI). O staticcheck não precisa de instalação —
 `make lint` o executa via `go run` na versão pinada. Só o `govulncheck` precisa
@@ -46,7 +52,14 @@ o do pipeline.
 | `vuln` | `govulncheck ./...` |
 | `web` | builda a SPA Svelte em `internal/webui/dist/` (requer Node/pnpm) |
 | `web-test` | testes de contrato da SPA (`node --test`) |
-| `dist` | cross-compile estático para `PLATFORMS` |
+| `dist` | cross-compile estático e reprodutível para `PLATFORMS` |
+| `dist-verify` | prova de reprodutibilidade: dois builds limpos, SHA-256 idênticos |
+| `sbom` | gera o SBOM CycloneDX 1.6 em `dist/sbom.cdx.json` |
+| `sbom-check` | valida o SBOM (JSON, CycloneDX, todos os `require` do go.mod) |
+| `checksums` | gera `dist/SHA256SUMS` dos binários e do SBOM |
+| `checksums-verify` | confere o manifesto existente contra os arquivos em `dist/` |
+| `sign` | assina o manifesto com cosign keyless (não falha sem cosign) |
+| `release-check` | gate completo de release: gates + dist + dist-verify + SBOM + checksums + verificação |
 | `clean` | remove `bin/`, `dist/` e `coverage.out` |
 
 Para reproduzir o pipeline do CI (`.github/workflows/ci.yml`) do começo ao fim:
@@ -54,6 +67,50 @@ Para reproduzir o pipeline do CI (`.github/workflows/ci.yml`) do começo ao fim:
 ```sh
 make vet lint race cover-check vuln
 ```
+
+### Release, integridade e assinatura (F6 — ADR-SEC-09)
+
+O release é um único comando — gates de qualidade, binários reprodutíveis, SBOM
+CycloneDX, checksums e a verificação de cada artefato:
+
+```sh
+make release-check   # gates + dist + dist-verify + SBOM + checksums + verificação
+```
+
+Saída em `dist/`:
+
+- `heimdall-<versão>-linux-amd64` e `heimdall-<versão>-linux-arm64` — binários
+  ELF estáticos (`file` reporta `statically linked`);
+- `sbom.cdx.json` — SBOM **CycloneDX 1.6** gerado pelo `cyclonedx-gomod` pinado
+  (via `go run ...@versão`, sem binário externo) e determinístico
+  (`-noserial -notimestamp`); cobre todos os `require` do `go.mod`. Com
+  `SBOM_TOOL=syft` inclui também os componentes NPM da SPA;
+- `SHA256SUMS` — manifesto SHA-256 dos dois binários e do SBOM.
+
+**Verificação da integridade** pelo operador que baixou o release:
+
+```sh
+sha256sum -c dist/SHA256SUMS
+```
+
+**Assinatura.** Em release publicado por tag no GitHub Actions o manifesto é
+assinado com `cosign` keyless (OIDC/Fulcio/Rekor) por `make sign`. Sem o cosign
+no ambiente o alvo **não falha**: imprime o comando de assinatura e o de
+verificação e segue. Verificação do release assinado:
+
+```sh
+cosign verify-blob \
+  --certificate SHA256SUMS.pem --signature SHA256SUMS.sig \
+  --certificate-identity-regexp '^https://github.com/dandgabr/heimdall-core/' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  dist/SHA256SUMS
+sha256sum -c dist/SHA256SUMS
+```
+
+A ausência de assinatura em ambiente offline é dívida de infraestrutura aceita —
+**D-SEC-09-01** em [`docs/SECURITY-DEBT.md`](docs/SECURITY-DEBT.md) — cujo
+fallback é a proveniência SLSA do GitHub (`actions/attest-build-provenance`,
+passo preparado no workflow).
 
 ### GUI web embutida (F5.2b)
 

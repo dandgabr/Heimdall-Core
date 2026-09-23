@@ -12,6 +12,7 @@ Referências normativas: **ADR-003** (escopo de segurança do v1) e **ADR-002**
 | ID | Título | Status | Impacto | Bloqueia | Mitigação atual | Gatilho / dono |
 | --- | --- | --- | --- | --- | --- | --- |
 | **M-1** | Busca vetorial `vec0` da memória não implementada | **ABERTA** | O gate de memória é **FTS5-only**: o retrieval é lexical, sem similaridade semântica. O `modernc.org/sqlite v1.59.0` não expõe a extensão `vec0`. A ADR-SEC-07 prevê o tier vetorial. | Não bloqueia fase | Degrada para FTS5 sem falhar o boot; embeddings externos são opt-in e pseudonimizados (SEC-07 §4) | Quando o driver expuser `vec0` ou se adotarmos uma extensão/wasm vetorial; ADR-SEC-07 |
+| **S-1** | Advisory de módulo `GO-2026-5932` (`golang.org/x/crypto/openpgp`) | **FALSO-POSITIVO ACEITO** | `govulncheck` reporta 0 vulnerabilidades **alcançáveis** no código. O advisory é do pacote `openpgp` de `x/crypto`, que **não é importado** pelo produto (usamos apenas `x/crypto/argon2`). Sem caminho de chamada, sem risco. | Não bloqueia release | `govulncheck` bloqueia apenas por vulnerabilidade alcançável; o report de módulo é ruído | Reavaliar se `x/crypto` for atualizado/removido (ADR-SEC-09 §1.3) |
 
 ## Resolvidas
 
@@ -26,6 +27,33 @@ Referências normativas: **ADR-003** (escopo de segurança do v1) e **ADR-002**
 | P1-7 | CI não bloqueava (`SOFT_FAIL: "true"`, sem limiar) | **CORRIGIDO** | Gate eliminado: `continue-on-error` removido e nenhuma variável de bootstrap restou; `make cover-check` falha abaixo de `COVER_MIN=70` (medido 74,3%) | 2026-09-22 |
 
 ## Backlog vinculado
+
+### D-SEC-09-01 — Assinatura Cosign Keyless e Fallback de Proveniência em Builds Offline
+
+**Decisão: Aceita como dívida de infraestrutura pela ADR-SEC-09.**
+**Estado em F6.1 (2026-09-23): implementada a parte offline; assinatura segue pendente.**
+
+Entregue nesta fase (caminho local sem cosign, que é o de hoje):
+- Compilação reprodutível bit-a-bit (`-trimpath -buildvcs=false`, `-s -w`,
+  `CGO_ENABLED=0`), provada por `make dist-verify` — dois builds limpos com
+  SHA-256 idêntico.
+- Manifesto de integridade `dist/SHA256SUMS` (binários + SBOM) com verificação
+  por `make checksums-verify` / `sha256sum -c`.
+- SBOM CycloneDX 1.6 determinístico em `dist/sbom.cdx.json` (`make sbom`).
+- Alvo `make sign` preparado: assina o manifesto com cosign keyless quando o
+  binário existe e, quando não existe, **não falha o build** — imprime os
+  comandos de assinatura e verificação.
+- Passo de proveniência SLSA (`actions/attest-build-provenance`) preparado e
+  comentado no job `release` do CI, condicionado a tag.
+
+Pendente (permanece como dívida):
+- Executar a assinatura de fato. Exige o binário `cosign` e conectividade com
+  Fulcio/Rekor com OIDC — indisponível neste ambiente, por isso não há `.sig`/
+  `.pem` publicados ainda.
+
+Justificativa:
+- A assinatura keyless com Sigstore Cosign depende de conectividade com a infraestrutura pública Fulcio/Rekor e tokens OIDC emitidos pelo ambiente de execução (ex.: GitHub Actions).
+- Em compilações locais isoladas ou sem acesso à Internet, o release adota o fallback estrito documentado na ADR-SEC-09: geração de manifesto de integridade SHA-256 (`checksums.txt`) e atestação de proveniência de build SLSA.
 
 ### BD-01 — Autenticação de cliente em `/v1/*`
 
