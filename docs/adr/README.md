@@ -99,6 +99,44 @@ implementadores citam no código — são registradas aqui.
 > normativa é o arquivo da ADR; as páginas correspondentes no ai-memory
 > continuam como contexto de planejamento.
 
+### Bloqueiam a F4
+
+| ADR | Título | Status | Data | Arquivo |
+| --- | --- | --- | --- | --- |
+| **SEC-03** | Invariante de confiança de gates | Aceita | 2026-09-22 | [`sec-03-invariante-de-gates.md`](sec-03-invariante-de-gates.md) |
+| **SEC-04** | Ordem e semântica do `GateChain` | Aceita | 2026-09-22 | [`sec-04-ordem-e-pipeline.md`](sec-04-ordem-e-pipeline.md) |
+| **SEC-07** | Memória: conteúdo, TTL, namespace e governança de privacidade | Aceita | 2026-09-22 | [`sec-07-memoria-conteudo-e-politica.md`](sec-07-memoria-conteudo-e-politica.md) |
+
+> **ADR-SEC-03/04/07 são a base de segurança da F4.** A ADR-SEC-03 formaliza a
+> invariante de que gates nativos são exclusivamente built-in (terceiros só WASM)
+> e o princípio do menor conteúdo necessário (SEC-13); a ADR-SEC-04 fixa a ordem
+> de execução como dependência estrita de dados e segurança (não ordem de valor)
+> e a semântica de pré/pós commit; e a ADR-SEC-07 rege a governança de memória,
+> com isolamento por namespace, proveniência anti-envenenamento e desacoplamento
+> de escrita via `AsyncSink`.
+
+### Bloqueiam a F4 (arquitetura)
+
+| ADR | Título | Status | Data | Arquivo |
+| --- | --- | --- | --- | --- |
+| **0014** | DAG de gates e política de falha por gate | Aceita | 2026-09-22 | [`0014-dag-de-gates-e-politica-de-falha.md`](0014-dag-de-gates-e-politica-de-falha.md) |
+| **0015** | Preservação de prompt cache (`cacheImpact`, prefix-freeze) | Aceita | 2026-09-22 | [`0015-preservacao-de-prompt-cache.md`](0015-preservacao-de-prompt-cache.md) |
+
+> **ADR-0014/0015 são o mecanismo e a economia da F4.** A ADR-0014 define **como**
+> a ordem da ADR-SEC-04 é derivada (grafo de leitura/escrita sobre o request, Kahn
+> com desempate por `ID()`, ciclo rejeitado no boot), como a `FailurePolicy` é
+> aplicada por fase (erro pós-200 → evento SSE terminal) e como um gate é
+> ligado/desligado por feature flag sem tocar o core — exigindo que os metadados
+> por chunk sejam calculados **uma vez por request** (baseline F1: 50 allocs/chunk
+> com 10 gates). A ADR-0015 define **o que o gate de token pode tocar**: `lossy` +
+> `cacheImpact` obrigatórios, prefixo cacheável congelado (`prefix-freeze`), opt-in
+> explícito para `ImpactHigh`, afinidade de sessão como peso do Router e métrica de
+> economia **líquida** do cache perdido.
+
+> As ADRs que bloqueiam fases estão registradas nesta pasta. A referência
+> normativa é o arquivo da ADR; as páginas correspondentes no ai-memory
+> continuam como contexto de planejamento.
+
 ### Aceitas por fase
 
 | ADR | Título | Bloqueia | Status |
@@ -113,6 +151,11 @@ implementadores citam no código — são registradas aqui.
 | 0011 | [Modelo de cota e `UsageRecorder`](0011-modelo-de-cota.md) | F3 | Aceita |
 | 0012 | [`Breaker`: escopos, cooldown e half-open](0012-breaker.md) | F3 | Aceita |
 | 0013 | [Combos nomeados como DAG validado](0013-combos-como-dag.md) | F3 | Aceita |
+| SEC-03 | [Invariante de confiança de gates](sec-03-invariante-de-gates.md) | F4 | Aceita |
+| SEC-04 | [Ordem e semântica do `GateChain`](sec-04-ordem-e-pipeline.md) | F4 | Aceita |
+| SEC-07 | [Memória: conteúdo, TTL, namespace e governança de privacidade](sec-07-memoria-conteudo-e-politica.md) | F4 | Aceita |
+| 0014 | [DAG de gates e política de falha por gate](0014-dag-de-gates-e-politica-de-falha.md) | F4 | Aceita |
+| 0015 | [Preservação de prompt cache (`cacheImpact`, prefix-freeze)](0015-preservacao-de-prompt-cache.md) | F4 | Aceita |
 
 ### Previstas (ainda não escritas)
 
@@ -128,10 +171,5 @@ Mantidas aqui para reservar o número e evitar colisão. Cada uma deve existir
 | 0006 | Protocolo de streaming/SSE canônico | F2 |
 | 0007 | Compatibilidade OpenAI (subset explícito) | F2 |
 | 0008 | Orçamentos de timeout e retry | F2 |
-| SEC-03 | Invariante de confiança de gates | F4 |
-| SEC-04 | Ordem e semântica do `GateChain` | F4 |
-| SEC-07 | Conteúdo, TTL e namespace da memória | F4 |
-| 0014 | DAG de gates e política de falha por gate | F4 |
-| 0015 | Preservação de prompt cache (`cacheImpact`, prefix-freeze) | F4 |
 | SEC-06 | Modelo de confiança da Management API | F5 |
 | SEC-09 | Supply chain e release | F6 |
