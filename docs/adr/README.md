@@ -137,6 +137,18 @@ implementadores citam no código — são registradas aqui.
 > normativa é o arquivo da ADR; as páginas correspondentes no ai-memory
 > continuam como contexto de planejamento.
 
+### Bloqueiam a F5
+
+| ADR | Título | Status | Data | Arquivo |
+| --- | --- | --- | --- | --- |
+| **SEC-06** | Modelo de confiança da Management API | Aceita | 2026-09-23 | [`sec-06-management-api-trust.md`](sec-06-management-api-trust.md) |
+
+> **ADR-SEC-06 é a base de segurança e confiança da F5.** Ela fecha a dívida P1-6 e o
+> backlog BD-01, estabelecendo o modelo de classes de rota (leitura, mutação e execução
+> sob catch-all `LOCAL_ONLY`-antes-de-auth), autenticação de cliente em `/v1/*` segregada
+> do token de gestão (ambos hash-only, constant-time compare), defesas contra DNS rebinding
+> (validação de `Host`) e anti-CSRF (validação de `Origin`/`Referer`, CORS fechado).
+
 ### Aceitas por fase
 
 | ADR | Título | Bloqueia | Status |
@@ -156,6 +168,7 @@ implementadores citam no código — são registradas aqui.
 | SEC-07 | [Memória: conteúdo, TTL, namespace e governança de privacidade](sec-07-memoria-conteudo-e-politica.md) | F4 | Aceita |
 | 0014 | [DAG de gates e política de falha por gate](0014-dag-de-gates-e-politica-de-falha.md) | F4 | Aceita |
 | 0015 | [Preservação de prompt cache (`cacheImpact`, prefix-freeze)](0015-preservacao-de-prompt-cache.md) | F4 | Aceita |
+| SEC-06 | [Modelo de confiança da Management API](sec-06-management-api-trust.md) | F5 | Aceita |
 
 ### Previstas (ainda não escritas)
 
@@ -171,5 +184,5 @@ Mantidas aqui para reservar o número e evitar colisão. Cada uma deve existir
 | 0006 | Protocolo de streaming/SSE canônico | F2 |
 | 0007 | Compatibilidade OpenAI (subset explícito) | F2 |
 | 0008 | Orçamentos de timeout e retry | F2 |
-| SEC-06 | Modelo de confiança da Management API | F5 |
 | SEC-09 | Supply chain e release | F6 |
+

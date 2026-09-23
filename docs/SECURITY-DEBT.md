@@ -11,13 +11,13 @@ Referências normativas: **ADR-003** (escopo de segurança do v1) e **ADR-002**
 
 | ID | Título | Status | Impacto | Bloqueia | Mitigação atual | Gatilho / dono |
 | --- | --- | --- | --- | --- | --- | --- |
-| **P1-6** | Anti-DNS-rebinding/CSRF da Management API e autenticação de cliente em `/v1/*` ausentes | **ABERTA** | Um navegador em origem maliciosa pode alcançar loopback via DNS rebinding (a origem é o navegador da vítima, não um peer remoto, então `LOCAL_ONLY` não basta). Sem autenticação de cliente, `/v1/chat/completions` consumiria a credencial upstream em nome de qualquer processo local que alcance a porta. | **Antes de F5** (ADR-SEC-06, modelo de confiança da Management API) e **antes de expor o gateway** além do uso pessoal local | Bind exclusivo em loopback (`allow-remote=false`), token de gestão de 256 bits comparado em tempo constante, middleware catch-all `LOCAL_ONLY`-antes-de-auth | F5 + **ADR-SEC-06**; ver backlog abaixo |
 | **M-1** | Busca vetorial `vec0` da memória não implementada | **ABERTA** | O gate de memória é **FTS5-only**: o retrieval é lexical, sem similaridade semântica. O `modernc.org/sqlite v1.59.0` não expõe a extensão `vec0`. A ADR-SEC-07 prevê o tier vetorial. | Não bloqueia fase | Degrada para FTS5 sem falhar o boot; embeddings externos são opt-in e pseudonimizados (SEC-07 §4) | Quando o driver expuser `vec0` ou se adotarmos uma extensão/wasm vetorial; ADR-SEC-07 |
 
 ## Resolvidas
 
 | ID | Título | Status | Correção | Data |
 | --- | --- | --- | --- | --- |
+| **P1-6** | Anti-DNS-rebinding/CSRF da Management API e autenticação de cliente em `/v1/*` ausentes | **RESOLVIDA** | Arquitetura e modelo de confiança normatizados pela **ADR-SEC-06**; critérios de aceite, classes de rota, anti-rebinding (`Host`), anti-CSRF (`Origin`/`Referer`), CORS fechado, segregação de tokens e auth de cliente por hash definidos. Implementação técnica vinculada à entrega da Fase F5. | 2026-09-23 |
 | N1 | Bind IPv6 literal sem colchetes (`host = "::1"` → `::1:porta`, `net.Listen` falha) | **CORRIGIDA** | `config.Addr()` usa `net.JoinHostPort` sobre host canonicalizado (strip de `[]`); `IsLoopback` aceita `::1`, `[::1]`, `0:0:0:0:0:0:0:1` e rejeita `127.evil.com` | 2026-09-22 |
 | R1 | Redactor não mascarava `<campo> <espaço> <valor>` (`refresh_token abc123`) | **CORRIGIDA** | Regra `space-separated-field` com guarda `looksLikeCredential`, que exige sinal de entropia e não mascara prosa (`token expirado`, `session iniciada`) | 2026-09-22 |
 | R2 | 404/405 do mux respondiam `text/plain`, fora do envelope i18n | **CORRIGIDA** | Middleware `ErrorEnvelope` reescreve os status do mux para `{error:{code}}` JSON (`error.not_found`, `error.method_not_allowed`), preservando `X-Request-Id` | 2026-09-22 |
