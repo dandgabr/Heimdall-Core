@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -18,7 +19,9 @@ import (
 	"golang.org/x/term"
 
 	"github.com/dandgabr/heimdall-core/internal/app"
+	"github.com/dandgabr/heimdall-core/internal/combos"
 	"github.com/dandgabr/heimdall-core/internal/config"
+	"github.com/dandgabr/heimdall-core/internal/contracts"
 	"github.com/dandgabr/heimdall-core/internal/domain"
 	"github.com/dandgabr/heimdall-core/internal/i18n"
 )
@@ -110,7 +113,7 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.AddCommand(newServeCmd(), newVersionCmd(), newTokenCmd(), newProviderCmd())
+	root.AddCommand(newServeCmd(), newVersionCmd(), newTokenCmd(), newProviderCmd(), newComboCmd())
 	return root
 }
 
@@ -529,6 +532,173 @@ func newProviderTestCmd() *cobra.Command {
 			// the key.
 			_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s\tcredential=%s\tstatus=%d\n",
 				res.Provider, res.CredentialID, res.Status)
+			return err
+		},
+	}
+	cmd.Flags().StringVar(&configPath, "config", "", "path to the TOML configuration file")
+	return cmd
+}
+
+// newComboCmd groups the combo management commands. A combo is a named,
+// validated DAG of routing steps (ADR-0013): create validates and persists,
+// list reads the durable set, delete removes one.
+func newComboCmd() *cobra.Command {
+	combo := &cobra.Command{
+		Use:   "combo",
+		Short: "Create, list and delete named routing combos",
+	}
+	combo.AddCommand(newComboListCmd(), newComboCreateCmd(), newComboDeleteCmd())
+	return combo
+}
+
+// parseComboSteps parses a compact step list. Each step is
+// `kind:ref[:weight]`:
+//
+//	model:glm-4.6
+//	provider:z.ai
+//	combo:base
+//	model:glm-4.6:5      (weight 5 for `weighted`)
+//
+// The kind is one of model|provider|combo. This is deliberately a small,
+// scriptable grammar; the GUI/TOML combo authoring is a later phase.
+func parseComboSteps(raw []string) ([]combos.Step, error) {
+	steps := make([]combos.Step, 0, len(raw))
+	for _, item := range raw {
+		parts := strings.Split(item, ":")
+		if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+			return nil, domain.New(domain.CodeRouteInvalidCombo,
+				domain.WithHTTPStatus(400),
+				domain.WithScope(domain.ScopeRequest),
+				domain.WithParams(map[string]string{"name": item, "reason": "step must be kind:ref[:weight]"}),
+			)
+		}
+		step := combos.Step{Ref: parts[1]}
+		switch parts[0] {
+		case "model":
+			step.Kind = combos.StepModel
+		case "provider":
+			step.Kind = combos.StepProviderWildcard
+		case "combo":
+			step.Kind = combos.StepComboRef
+		default:
+			return nil, domain.New(domain.CodeRouteInvalidCombo,
+				domain.WithHTTPStatus(400),
+				domain.WithScope(domain.ScopeRequest),
+				domain.WithParams(map[string]string{"name": item, "reason": "unknown step kind " + parts[0]}),
+			)
+		}
+		if len(parts) >= 3 && parts[2] != "" {
+			w, err := strconv.Atoi(parts[2])
+			if err != nil {
+				return nil, domain.New(domain.CodeRouteInvalidCombo,
+					domain.WithHTTPStatus(400),
+					domain.WithScope(domain.ScopeRequest),
+					domain.WithParams(map[string]string{"name": item, "reason": "weight is not an integer"}),
+				)
+			}
+			step.Weight = w
+		}
+		steps = append(steps, step)
+	}
+	return steps, nil
+}
+
+func newComboCreateCmd() *cobra.Command {
+	var (
+		configPath string
+		strategy   string
+	)
+	cmd := &cobra.Command{
+		Use:   "create <name> <step>...",
+		Short: "Create (or replace) a named combo; each step is kind:ref[:weight]",
+		Long: "Create a named combo.\n\n" +
+			"Each step has the form `kind:ref[:weight]`, where kind is one of\n" +
+			"model|provider|combo:\n\n" +
+			"    heimdall combo create fast model:glm-4.6 provider:z.ai --strategy fallback",
+		Args: cobra.MinimumNArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			instance, err := buildReadOnly(configPath)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = instance.Close() }()
+
+			steps, err := parseComboSteps(args[1:])
+			if err != nil {
+				return err
+			}
+			sk, ok := contracts.ParseStrategyKind(strategy)
+			if !ok {
+				return domain.New(domain.CodeRouteInvalidCombo,
+					domain.WithHTTPStatus(400),
+					domain.WithScope(domain.ScopeRequest),
+					domain.WithParams(map[string]string{"name": args[0], "reason": "unknown strategy " + strategy}),
+				)
+			}
+			combo := combos.NewCombo(args[0], sk, steps)
+			if _, getErr := instance.Combos.Get(cmd.Context(), combo.ID); getErr == nil {
+				if err := instance.Combos.Update(cmd.Context(), combo); err != nil {
+					return err
+				}
+			} else if err := instance.Combos.Create(cmd.Context(), combo); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s\tstrategy=%s\tsteps=%d\n", combo.Name, combo.Strategy, len(combo.Steps))
+			return err
+		},
+	}
+	cmd.Flags().StringVar(&configPath, "config", "", "path to the TOML configuration file")
+	cmd.Flags().StringVar(&strategy, "strategy", string(contracts.StrategyFallback), "routing strategy")
+	return cmd
+}
+
+func newComboListCmd() *cobra.Command {
+	var configPath string
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List the persisted combos",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			instance, err := buildReadOnly(configPath)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = instance.Close() }()
+
+			list, err := instance.Combos.List(cmd.Context())
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			for _, c := range list {
+				if _, err := fmt.Fprintf(out, "%s\tstrategy=%s\tdepth=%d\tsteps=%d\n",
+					c.Name, c.Strategy, c.Depth, len(c.Steps)); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&configPath, "config", "", "path to the TOML configuration file")
+	return cmd
+}
+
+func newComboDeleteCmd() *cobra.Command {
+	var configPath string
+	cmd := &cobra.Command{
+		Use:   "delete <name>",
+		Short: "Delete a persisted combo",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			instance, err := buildReadOnly(configPath)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = instance.Close() }()
+
+			if err := instance.Combos.Delete(cmd.Context(), domain.ComboID(args[0])); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "deleted\t%s\n", args[0])
 			return err
 		},
 	}

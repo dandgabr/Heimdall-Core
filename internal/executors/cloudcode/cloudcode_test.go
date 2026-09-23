@@ -642,3 +642,40 @@ func TestSingleChunkStream(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 }
+
+// TestDoStreamEmptyAndUnknownFramesSkipped covers readFrame's skip branches: an
+// empty `data:` payload and a non-data field line, followed by real content and
+// the [DONE] terminator (which yields a clean EOF, never a chunk).
+func TestDoStreamEmptyAndUnknownFramesSkipped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		for _, frame := range []string{
+			"event: ping\n",
+			"data:\n\n",
+			`data: {"response":{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}}` + "\n\n",
+			"data: [DONE]\n\n",
+		} {
+			_, _ = w.Write([]byte(frame))
+			w.(http.Flusher).Flush()
+		}
+	}))
+	defer srv.Close()
+
+	e := loopbackExecutor(t, srv, 0)
+	stream, err := e.DoStream(context.Background(), contracts.WireRequest{
+		Body: []byte(`{"model":"gemini-3.5-flash","messages":[]}`), Model: "gemini-3.5-flash", Stream: true,
+	}, oauthCred())
+	if err != nil {
+		t.Fatalf("DoStream: %v", err)
+	}
+	defer stream.Close()
+
+	ch, err := stream.Recv()
+	if err != nil || !strings.Contains(string(ch.Data), "ok") {
+		t.Fatalf("first Recv = %q, %v", ch.Data, err)
+	}
+	if _, err := stream.Recv(); err != io.EOF {
+		t.Fatalf("second Recv = %v, want io.EOF after [DONE]", err)
+	}
+}

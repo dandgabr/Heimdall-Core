@@ -99,7 +99,8 @@ func loopbackExecutor(t *testing.T, srv *httptest.Server, idle time.Duration) *E
 }
 
 // TestDoStreamDecodesSSEEvents covers the frame decoding: multi-line data is
-// joined, event and id are preserved, and a comment is skipped.
+// joined, event and id are preserved, the comment is skipped, and the `[DONE]`
+// sentinel is consumed as a clean EOF rather than delivered as a chunk (D-01).
 func TestDoStreamDecodesSSEEvents(t *testing.T) {
 	srv := streamServer(t, []string{
 		": keep-alive\n\n",
@@ -130,8 +131,10 @@ func TestDoStreamDecodesSSEEvents(t *testing.T) {
 		}
 		got = append(got, ch)
 	}
-	if len(got) != 3 {
-		t.Fatalf("chunks = %d, want 3 (comment skipped): %+v", len(got), got)
+	// Only the two real data events are delivered; the comment is skipped and
+	// the `[DONE]` sentinel terminated the stream without becoming a chunk.
+	if len(got) != 2 {
+		t.Fatalf("chunks = %d, want 2 (comment skipped, [DONE] consumed): %+v", len(got), got)
 	}
 	if got[0].Event != "message" || got[0].ID != "7" || string(got[0].Data) != `{"a":1}` {
 		t.Errorf("chunk0 = %+v", got[0])
@@ -139,8 +142,54 @@ func TestDoStreamDecodesSSEEvents(t *testing.T) {
 	if string(got[1].Data) != "line1\nline2" {
 		t.Errorf("multi-line data = %q", got[1].Data)
 	}
-	if string(got[2].Data) != "[DONE]" {
-		t.Errorf("chunk2 = %q", got[2].Data)
+	for _, ch := range got {
+		if contracts.IsSSEDone(ch.Data) {
+			t.Errorf("[DONE] leaked as a chunk: %+v", ch)
+		}
+	}
+}
+
+// TestDoStreamDoneIsCleanEOF is the D-01 regression: an upstream that sends a
+// data event and then `data: [DONE]` must yield the data chunk, then a clean
+// EOF — never `[DONE]` as a chunk.
+func TestDoStreamDoneIsCleanEOF(t *testing.T) {
+	srv := streamServer(t, []string{
+		`data: {"choices":[{"delta":{"content":"hi"}}]}` + "\n\n",
+		"data: [DONE]\n\n",
+	}, false)
+	e := loopbackExecutor(t, srv, 0)
+
+	stream, err := e.DoStream(context.Background(), contracts.WireRequest{}, apiKeyCred())
+	if err != nil {
+		t.Fatalf("DoStream: %v", err)
+	}
+	defer stream.Close()
+
+	ch, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("first Recv: %v", err)
+	}
+	if !strings.Contains(string(ch.Data), "hi") {
+		t.Fatalf("first chunk = %q", ch.Data)
+	}
+	// The very next Recv must be EOF: the sentinel was consumed, not delivered.
+	if _, err := stream.Recv(); err != io.EOF {
+		t.Fatalf("second Recv = %v, want io.EOF (the [DONE] must be consumed)", err)
+	}
+}
+
+// TestDoStreamDoneWithWhitespaceIsConsumed proves the shared helper tolerates
+// the common `data:  [DONE]` spacing form.
+func TestDoStreamDoneWithWhitespaceIsConsumed(t *testing.T) {
+	srv := streamServer(t, []string{"data:  [DONE]  \n\n"}, false)
+	e := loopbackExecutor(t, srv, 0)
+	stream, err := e.DoStream(context.Background(), contracts.WireRequest{}, apiKeyCred())
+	if err != nil {
+		t.Fatalf("DoStream: %v", err)
+	}
+	defer stream.Close()
+	if _, err := stream.Recv(); err != io.EOF {
+		t.Fatalf("Recv = %v, want io.EOF", err)
 	}
 }
 

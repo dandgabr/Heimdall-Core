@@ -322,6 +322,47 @@ enabled = true
 	}
 }
 
+// TestProvidersModelsParsed proves a provider's `models` string array is parsed
+// into the declared list, and env can set it too.
+func TestProvidersModelsParsed(t *testing.T) {
+	path := writeTOML(t, `config_version = 1
+[[providers]]
+id = "z.ai"
+base_url = "https://x/v1"
+models = ["glm-4.6", "glm-4.5"]
+enabled = true
+`)
+	cfg, err := Load(Options{FilePath: path, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := cfg.Providers[0].Models
+	if len(got) != 2 || got[0] != "glm-4.6" || got[1] != "glm-4.5" {
+		t.Fatalf("models = %v", got)
+	}
+
+	// Env override of the list.
+	cfg2, err := Load(Options{FilePath: path, Env: map[string]string{
+		"HEIMDALL_PROVIDERS_0_MODELS": "a,b , c",
+	}})
+	if err != nil {
+		t.Fatalf("Load(env): %v", err)
+	}
+	if got := cfg2.Providers[0].Models; len(got) != 3 || got[2] != "c" {
+		t.Fatalf("env models = %v", got)
+	}
+}
+
+// TestSplitList covers the comma list parser.
+func TestSplitList(t *testing.T) {
+	if got := splitList("  "); got != nil {
+		t.Fatalf("blank list = %v, want nil", got)
+	}
+	if got := splitList("a,,b, "); len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Fatalf("splitList = %v", got)
+	}
+}
+
 // TestProvidersEnvAddsNewEntry covers env creating a provider entry that the
 // file did not declare.
 func TestProvidersEnvAddsNewEntry(t *testing.T) {

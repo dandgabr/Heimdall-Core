@@ -211,6 +211,7 @@ var providerEnvFields = map[string]string{
 	"TTFT":           "ttft",
 	"IDLE":           "idle",
 	"ENABLED":        "enabled",
+	"MODELS":         "models",
 }
 
 // parseProviderEnvVar recognises HEIMDALL_PROVIDERS_<index>_<FIELD> and returns
@@ -373,10 +374,29 @@ func setProvider(cfg *Config, index int, field, value string) error {
 			return badValue("providers."+strconv.Itoa(index)+".enabled", value)
 		}
 		p.Enabled = b
+	case "models":
+		p.Models = splitList(value)
 	default:
 		// forward-compatible: ignore unknown provider fields
 	}
 	return nil
+}
+
+// splitList splits a comma-separated value into its non-empty, trimmed parts.
+// It is the inverse of the comma-join flatten applies to a string array, so a
+// provider's model list has one representation from TOML and from env.
+func splitList(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // parseDuration parses a Go duration string ("30s", "2m"). An empty value means
@@ -427,6 +447,19 @@ func flatten(in map[string]any) map[string]string {
 				for i, elem := range typed {
 					walk(key+"."+strconv.Itoa(i), elem)
 				}
+			case []string:
+				// A string list, e.g. providers.0.models. Join with commas so
+				// the value layer has one representation whether it came from
+				// TOML or an env var (splitList reverses it).
+				out[key] = strings.Join(typed, ",")
+			case []any:
+				// A heterogeneous scalar array (TOML decodes ["a","b"] this
+				// way). Stringify each element; the consumer splits on commas.
+				parts := make([]string, 0, len(typed))
+				for _, elem := range typed {
+					parts = append(parts, fmt.Sprintf("%v", elem))
+				}
+				out[key] = strings.Join(parts, ",")
 			case string:
 				out[key] = typed
 			case bool:

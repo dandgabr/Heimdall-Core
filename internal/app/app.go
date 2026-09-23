@@ -15,6 +15,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -24,18 +25,23 @@ import (
 	"github.com/dandgabr/heimdall-core/internal/api/openai"
 	"github.com/dandgabr/heimdall-core/internal/auth"
 	"github.com/dandgabr/heimdall-core/internal/auth/oauth"
+	"github.com/dandgabr/heimdall-core/internal/breaker"
 	"github.com/dandgabr/heimdall-core/internal/config"
 	"github.com/dandgabr/heimdall-core/internal/contracts"
+	"github.com/dandgabr/heimdall-core/internal/dispatcher"
 	"github.com/dandgabr/heimdall-core/internal/domain"
 	"github.com/dandgabr/heimdall-core/internal/egress"
 	"github.com/dandgabr/heimdall-core/internal/executors"
 	"github.com/dandgabr/heimdall-core/internal/gates"
+	"github.com/dandgabr/heimdall-core/internal/gateway"
 	"github.com/dandgabr/heimdall-core/internal/i18n"
 	"github.com/dandgabr/heimdall-core/internal/importers"
 	"github.com/dandgabr/heimdall-core/internal/observability"
 	"github.com/dandgabr/heimdall-core/internal/passthrough"
 	"github.com/dandgabr/heimdall-core/internal/pipeline"
 	"github.com/dandgabr/heimdall-core/internal/providers"
+	"github.com/dandgabr/heimdall-core/internal/quota"
+	"github.com/dandgabr/heimdall-core/internal/router"
 	"github.com/dandgabr/heimdall-core/internal/secret"
 	"github.com/dandgabr/heimdall-core/internal/store"
 )
@@ -55,6 +61,16 @@ type App struct {
 	Flows       *auth.FlowFactory
 	// Gates is the frozen gate chain, wired with the F1 logger gate.
 	Gates *pipeline.Chain
+
+	// F3 routing layer.
+	Combos     *store.ComboStore
+	Router     *router.Resolver
+	Breaker    *breaker.Breaker
+	QuotaRec   *quota.Recorder
+	QuotaFilt  *quota.Filter
+	Dispatcher *dispatcher.Dispatcher
+	// Gateway is the minimal inference handler (POST /v1/chat/completions).
+	Gateway *gateway.Handler
 
 	env    map[string]string
 	server *http.Server
@@ -111,6 +127,10 @@ type appSeams struct {
 	// CloseStore releases the store on Close. It is a seam for the
 	// store-close-error branch.
 	CloseStore func(*store.Store) error
+	// WireRouting builds the F3 routing layer. It is a seam so a test can force
+	// a construction failure (which a healthy registry never produces) and prove
+	// the boot fails closed by closing the store.
+	WireRouting func(*App) error
 }
 
 var defaultAppSeams = appSeams{
@@ -129,6 +149,7 @@ var defaultAppSeams = appSeams{
 	},
 	ShutdownServer: func(s *http.Server, ctx context.Context) error { return s.Shutdown(ctx) },
 	CloseStore:     func(s *store.Store) error { return s.Close() },
+	WireRouting:    func(a *App) error { return a.wireRouting() },
 }
 
 // appSeam is swapped by tests; never mutated in production.
@@ -200,6 +221,14 @@ func Build(opts Options) (*App, error) {
 		return nil, err
 	}
 
+	// Build the F3 routing layer AFTER the vault, so the executor factory sees
+	// the resolved SecretStore (the executor opens a credential's sealed blob
+	// through it). A construction failure is fatal at boot.
+	if err := appSeam.WireRouting(app); err != nil {
+		_ = st.Close()
+		return nil, err
+	}
+
 	app.server = &http.Server{
 		Addr:              cfg.Server.Addr(),
 		Handler:           app.Handler(),
@@ -231,17 +260,7 @@ func (a *App) wireVault(opts Options) error {
 	registry := providers.NewRegistry()
 	for _, desc := range appSeam.Descriptors() {
 		pc := byID[desc.ID]
-		family, err := providers.NewOpenAICompat(providers.OpenAICompatOptions{
-			ID:         desc.ID,
-			Descriptor: desc,
-			// Declare the real modes so listing and routing agree.
-			AuthModes:             auth.AuthModesFor(desc.ID),
-			BaseURL:               pc.BaseURL,
-			AllowLoopback:         pc.AllowLoopback,
-			AuthHeader:            authHeaderStyle(pc.AuthHeader),
-			ResponseHeaderTimeout: pc.TTFT,
-			IdleTimeout:           pc.Idle,
-		})
+		family, err := buildFamily(desc, pc)
 		if err != nil {
 			return err
 		}
@@ -353,6 +372,59 @@ func isMissingKey(err error) bool {
 type systemClock struct{}
 
 func (systemClock) Now() time.Time { return time.Now() }
+
+// familyModels converts the operator-declared model ids into the capability
+// table a family is built with. It declares every model with the streaming +
+// tools + system-prompt capabilities and the text modality: enough for the
+// Router to route and the capability-aware ordering to keep the model, without
+// inventing per-model capabilities the operator did not declare. An empty list
+// leaves the family with no declared models (not routable until one is added).
+func familyModels(models []string) map[domain.ModelID]providers.ModelCapabilities {
+	out := make(map[domain.ModelID]providers.ModelCapabilities, len(models))
+	caps := contracts.CapStream.Add(contracts.CapTools, contracts.CapSystemPrompt)
+	mods := contracts.ModalitySet(0).Add(contracts.ModalityText)
+	for _, m := range models {
+		if m == "" {
+			continue
+		}
+		out[domain.ModelID(m)] = providers.ModelCapabilities{Capabilities: caps, Modalities: mods}
+	}
+	return out
+}
+
+// buildFamily constructs the ProviderFamily for a descriptor, branching on the
+// PROTOCOL (ADR-0010 wiring / BD-02): WireCloudCode gets the CloudCode family
+// (the Antigravity connector), every other dialect gets the OpenAI-compatible
+// one. The family, not the caller, then builds the correct executor in
+// BuildExecutor, so the two dialects can never share a transport by accident.
+func buildFamily(desc contracts.ProviderDescriptor, pc config.ProviderConfig) (contracts.ProviderFamily, error) {
+	models := familyModels(pc.Models)
+	switch desc.Protocol {
+	case contracts.WireCloudCode:
+		return providers.NewCloudCode(providers.CloudCodeOptions{
+			ID:                    desc.ID,
+			Descriptor:            desc,
+			AuthModes:             auth.AuthModesFor(desc.ID),
+			Models:                models,
+			BaseURL:               pc.BaseURL,
+			AllowLoopback:         pc.AllowLoopback,
+			ResponseHeaderTimeout: pc.TTFT,
+			IdleTimeout:           pc.Idle,
+		})
+	default:
+		return providers.NewOpenAICompat(providers.OpenAICompatOptions{
+			ID:                    desc.ID,
+			Descriptor:            desc,
+			AuthModes:             auth.AuthModesFor(desc.ID),
+			Models:                models,
+			BaseURL:               pc.BaseURL,
+			AllowLoopback:         pc.AllowLoopback,
+			AuthHeader:            authHeaderStyle(pc.AuthHeader),
+			ResponseHeaderTimeout: pc.TTFT,
+			IdleTimeout:           pc.Idle,
+		})
+	}
+}
 
 // authHeaderStyle maps the config string onto the executor's auth-header style.
 // "" and "bearer" both mean Bearer; "x-api-key" selects the Anthropic-style
@@ -792,6 +864,156 @@ func (a *App) wireGates() error {
 	return nil
 }
 
+// wireRouting builds the F3 routing layer (ADR-0009/0010/0011/0012/0013): the
+// combo store, the Router over the provider catalog, the durable quota recorder
+// and filter, the in-memory breaker, the Dispatcher and the inference gateway.
+//
+// The quota state is DURABLE (SQLite, ADR-0011 §4): a restart must not forget a
+// spent short window. The breaker is IN-MEMORY (ADR-0012 §6): a restart reopens
+// transient circuits, which is intentional and opposite in kind.
+func (a *App) wireRouting() error {
+	a.Combos = store.NewComboStore(a.Store, a.Providers)
+
+	catalog := providers.NewCatalog(a.Providers)
+	quotaCfg := quota.DefaultConfig(systemClock{})
+	a.QuotaRec = quota.NewRecorder(store.NewQuotaStore(a.Store), quotaCfg)
+	a.QuotaFilt = quota.NewFilter(a.QuotaRec, quotaCfg)
+	a.Breaker = breaker.New(systemClock{})
+
+	// The Router resolves a fusion combo into Panels + Judge. A Judge needs its
+	// OWN route (ADR-0009 §3: "o juiz é resolvido por um combo/rota próprio"),
+	// which is operator DATA no build exposes a config knob for yet; without it
+	// the fusion plan carries the panels and the Dispatcher uses the documented
+	// first-successful-panel fallback. Pipeline (Chain) needs no port.
+	resolver, err := newRouter(a.Combos, catalog,
+		router.WithPreflight(preflight{a.QuotaFilt, a.Breaker}),
+	)
+	if err != nil {
+		return err
+	}
+	a.Router = resolver
+
+	creds := credentialSource{store: a.Credentials, registry: a.Providers}
+	a.Dispatcher = dispatcher.New(
+		executorFactory{registry: a.Providers, secrets: a.Secrets},
+		creds,
+		a.Breaker,
+		a.QuotaFilt,
+		a.QuotaRec,
+		dispatcher.Config{Clock: systemClock{}, IDs: domainIDGen{}},
+	)
+	a.Gateway = gateway.New(a.Router, a.Dispatcher, a.Combos, a.Gates, a.Bundle, domainIDGen{})
+	return nil
+}
+
+// newRouter is a seam over router.New. The built-in strategy set is always
+// valid, so the constructor's error branch is only reachable by injection; the
+// seam lets a test prove wireRouting propagates it (fail-closed at boot).
+var newRouter = router.New
+
+// executorFactory adapts the provider registry to the Dispatcher's
+// ExecutorFactory port. It resolves the family by the candidate's ProviderID and
+// calls its BuildExecutor; the family decides the protocol (the registry holds
+// OpenAICompat vs CloudCode instances, chosen at registration).
+type executorFactory struct {
+	registry *providers.Registry
+	secrets  *secret.Store
+}
+
+// Build implements dispatcher.ExecutorFactory.
+func (f executorFactory) Build(ctx context.Context, c contracts.Candidate, cred contracts.Credential) (contracts.Executor, error) {
+	family, err := f.registry.Get(c.Provider)
+	if err != nil {
+		return nil, err
+	}
+	deps := contracts.ExecutorDeps{
+		Clock:    systemClock{},
+		IDs:      domainIDGen{},
+		Redactor: i18n.Redacter{},
+		Egress:   egress.New(),
+	}
+	if f.secrets != nil {
+		deps.Secrets = f.secrets
+	}
+	return family.BuildExecutor(cred, deps)
+}
+
+// credentialSource adapts the vault's CredentialStore to the Dispatcher's
+// CredentialSource port: it loads a credential by id and lists the credentials
+// of a provider (deterministically ordered so the Dispatcher's pick is
+// reproducible).
+type credentialSource struct {
+	store    *store.CredentialStore
+	registry *providers.Registry
+}
+
+// Get implements dispatcher.CredentialSource.
+func (c credentialSource) Get(ctx context.Context, id domain.CredentialID) (contracts.Credential, error) {
+	return c.store.Get(ctx, id)
+}
+
+// Credentials implements dispatcher.CredentialSource. The ids are returned in a
+// deterministic order (the vault's List order is by created_at DESC, id ASC; it
+// is re-sorted by id here so the pick does not depend on wall-clock insertion).
+func (c credentialSource) Credentials(ctx context.Context, provider domain.ProviderID) ([]domain.CredentialID, error) {
+	all, err := c.store.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []domain.CredentialID
+	for _, cred := range all {
+		if cred.Provider != provider {
+			continue
+		}
+		if !supportsAuthMode(c.registryAuthModes(provider), cred.AuthMode) {
+			continue
+		}
+		out = append(out, cred.ID)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out, nil
+}
+
+// registryAuthModes reports a family's supported auth modes, or nil when the
+// provider is unknown.
+func (c credentialSource) registryAuthModes(provider domain.ProviderID) []contracts.AuthMode {
+	family, err := c.registry.Get(provider)
+	if err != nil {
+		return nil
+	}
+	return family.AuthModes()
+}
+
+// preflight composes the quota filter and the breaker for the Router's preflight
+// port (ADR-0009 §1.3). A candidate is admitted only when the breaker allows it
+// and the quota filter keeps it.
+type preflight struct {
+	quota *quota.Filter
+	br    *breaker.Breaker
+}
+
+// AllowCandidate implements router.Preflight.
+func (p preflight) AllowCandidate(ctx context.Context, c contracts.Candidate) (bool, string) {
+	if !p.br.Allow(c) {
+		return false, "breaker_open"
+	}
+	filtered, skips := p.quota.Filter(ctx, contracts.RoutePlan{Attempts: []contracts.Candidate{c}, MaxRounds: 1})
+	if len(filtered.Attempts) == 0 {
+		return false, quotaSkipReason(skips)
+	}
+	return true, ""
+}
+
+// quotaSkipReason names the reason a quota filter removed a candidate. The real
+// filter always emits a Skip when it removes one, so the empty case is defensive
+// (a filter contract a fake could violate) and is tested directly.
+func quotaSkipReason(skips []contracts.Skip) string {
+	if len(skips) == 0 {
+		return "quota_exhausted"
+	}
+	return skips[0].Reason
+}
+
 // gateRecordCap bounds the in-memory gate record so a long-running daemon does
 // not accumulate unbounded metadata.
 const gateRecordCap = 1024
@@ -815,10 +1037,15 @@ func (a *App) Handler() http.Handler {
 		Verify: a.Store.VerifyManagementToken,
 	}).Register(mux)
 
-	// Passthrough is wired only when an upstream is configured, so an
-	// unconfigured instance does not advertise a route that can only 502.
-	apiKey := a.Config.Passthrough.Resolve(a.env)
-	if apiKey != "" && a.Config.Passthrough.BaseURL != "" {
+	// The F3 gateway owns POST /v1/chat/completions: it routes through the
+	// Router, executes through the Dispatcher and runs the GateChain. The legacy
+	// passthrough is wired ONLY when the gateway is absent (a build without the
+	// routing layer), so the two never contend for the same route.
+	if a.Gateway != nil {
+		a.Gateway.Register(mux)
+	} else if apiKey := a.Config.Passthrough.Resolve(a.env); apiKey != "" && a.Config.Passthrough.BaseURL != "" {
+		// Passthrough is wired only when an upstream is configured, so an
+		// unconfigured instance does not advertise a route that can only 502.
 		client, err := passthrough.NewClient(passthrough.ClientConfig{
 			BaseURL:               a.Config.Passthrough.BaseURL,
 			APIKey:                apiKey,

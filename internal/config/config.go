@@ -53,6 +53,11 @@ type Config struct {
 	// empty list is valid: the built-in descriptors still register (listable),
 	// and a provider without a base_url simply cannot build an executor yet.
 	Providers []ProviderConfig
+	// NOTE: combos are deliberately NOT a config block. Config declares
+	// BOOTSTRAP and TRANSPORT (where a provider is, how to reach it); combos are
+	// operator DATA that changes at runtime, so they live in the database like
+	// credentials (ADR-0013 §1). Declaring them here would create a second
+	// source of truth and a boot-time import path. See internal/combos.
 }
 
 // ProviderConfig configures ONE provider's upstream transport (ADR-SEC-05).
@@ -79,6 +84,13 @@ type ProviderConfig struct {
 	// have a BaseURL (fail-closed at Validate): silently registering a family
 	// that can never execute would be a trap.
 	Enabled bool
+	// Models is the set of model ids this provider serves. It is operator DATA
+	// (like credentials/combos, ADR-0013 §1): the Router expands a model step and
+	// a provider wildcard over the declared set, and a family that does not
+	// declare a model reports Capabilities ok=false so the Router skips it
+	// (ADR-0001). Empty means the provider declares no models and is not
+	// routable until one is added.
+	Models []string
 }
 
 // Server holds the HTTP listener settings.

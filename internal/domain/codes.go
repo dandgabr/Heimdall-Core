@@ -111,6 +111,47 @@ const (
 	CodeTranslateFailed      = "translate.failed"
 	CodeTranslateUnsupported = "translate.unsupported"
 
+	// route.* — combos and routing (F3, ADR-0009/ADR-0013). A combo is a named,
+	// validated DAG; every validation failure is typed at SAVE time, so a bad
+	// combo never reaches the request path.
+	CodeRouteInvalidCombo    = "route.invalid_combo"
+	CodeRouteCyclicCombo     = "route.cyclic_combo"
+	CodeRouteDepthExceeded   = "route.depth_exceeded"
+	CodeRouteFanoutExceeded  = "route.fanout_exceeded"
+	CodeRouteUnknownProvider = "route.unknown_provider"
+	CodeRouteNoCandidate     = "route.no_candidate"
+	// CodeRouteFusionSelfJudge is returned when a fusion combo's judge resolves
+	// to the fusion combo itself: that is infinite recursion and is refused
+	// (ADR-0009 §3).
+	CodeRouteFusionSelfJudge = "route.fusion_self_judge"
+	// CodeRouteFusionAllFailed is returned when every panel of a fusion fan-out
+	// failed: there is no winner to judge (ADR-0009 §3).
+	CodeRouteFusionAllFailed = "route.fusion_all_failed"
+
+	// quota.* — per-credential quota (F3, ADR-0011). Quota is a FILTER, not a
+	// gate: these codes are produced by the QuotaFilter (Skip.Code) and by the
+	// Dispatcher's aggregate when a candidate is filtered by quota. Every one is
+	// ScopeCredential (cooldown the account until the reset), never ScopeProvider:
+	// one account hitting its plan must not open the whole family's circuit.
+	CodeQuotaExhausted         = "quota.exhausted"
+	CodeQuotaRateLimited       = "quota.rate_limited"
+	CodeQuotaCostCap           = "quota.cost_cap"
+	CodeQuotaInvalidCredential = "quota.invalid_credential"
+
+	// breaker.* — circuit observability (F3, ADR-0012). `breaker.open`
+	// accompanies a preflight Skip (it is not itself an error returned to the
+	// client); `breaker.terminal` marks a credential invalid until human action.
+	CodeBreakerOpen     = "breaker.open"
+	CodeBreakerTerminal = "breaker.terminal"
+
+	// dispatch.* — the Dispatcher's aggregate outcomes (F3, ADR-0010 §7).
+	// These are produced when the attempt loop ends without a winner; they
+	// inherit the last attempt's classification so the caller/breaker acts on
+	// the most recent cause.
+	CodeDispatchNoAttempts = "dispatch.no_attempts"
+	CodeDispatchExhausted  = "dispatch.exhausted"
+	CodeDispatchMaxRounds  = "dispatch.max_rounds"
+
 	// import.* — read-only harness credential import (F1.6).
 	CodeImportFailed        = "import.failed"
 	CodeImportSourceMissing = "import.source_missing"

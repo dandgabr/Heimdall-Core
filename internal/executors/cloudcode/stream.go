@@ -105,8 +105,15 @@ func (s *sseStream) readFrame() ([]byte, bool, error) {
 			continue
 		}
 		payload := bytes.TrimSpace(line[len("data:"):])
-		if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+		if len(payload) == 0 {
 			continue
+		}
+		// The `[DONE]` sentinel is the TERMINATOR, not a frame (D-01): return a
+		// clean EOF (ok=false) so no consumer ever sees it as a chunk. Shared
+		// with the OpenAI decoder via contracts.IsSSEDone so the two cannot
+		// diverge.
+		if contracts.IsSSEDone(payload) {
+			return nil, false, nil
 		}
 		return payload, true, nil
 	}

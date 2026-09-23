@@ -284,13 +284,37 @@ func TestDefaultDataDirNoXDG(t *testing.T) {
 }
 
 // TestFlattenDefaultType covers flatten's default branch (a type TOML would not
-// produce but the function must still stringify).
+// produce but the function must still stringify). A plain Go int is used: it is
+// not int64 (the TOML form), so it reaches the default "%v" stringify.
 func TestFlattenDefaultType(t *testing.T) {
 	out := flatten(map[string]any{
-		"weird": []any{"a", "b"},
+		"weird": int(7),
 	})
-	if out["weird"] != "[a b]" {
-		t.Errorf("flatten default = %q, want the stringified slice", out["weird"])
+	if out["weird"] != "7" {
+		t.Errorf("flatten default = %q, want the stringified int", out["weird"])
+	}
+}
+
+// TestFlattenScalarList covers the []any branch: a TOML scalar array decodes as
+// []any and is joined with commas so a provider's models list round-trips.
+func TestFlattenScalarList(t *testing.T) {
+	out := flatten(map[string]any{
+		"providers": []map[string]any{
+			{"id": "z.ai", "models": []any{"glm", "glm-4.6"}},
+		},
+	})
+	if got := out["providers.0.models"]; got != "glm,glm-4.6" {
+		t.Errorf("models = %q, want the comma-joined list", got)
+	}
+}
+
+// TestFlattenStringSlice covers the []string branch directly: TOML yields []any,
+// so this branch is reachable only from a hand-built tree, but it must still
+// join with commas for one representation.
+func TestFlattenStringSlice(t *testing.T) {
+	out := flatten(map[string]any{"models": []string{"a", "b"}})
+	if out["models"] != "a,b" {
+		t.Errorf("models = %q, want a,b", out["models"])
 	}
 }
 

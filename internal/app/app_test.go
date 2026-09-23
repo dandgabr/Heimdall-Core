@@ -654,6 +654,11 @@ func TestHandlerRegistersPassthroughWhenConfigured(t *testing.T) {
 	}
 	defer func() { _ = a.Close() }()
 
+	// The F3 gateway owns /v1/chat/completions by default. This test targets the
+	// LEGACY passthrough branch, which is wired only when the gateway is absent,
+	// so nil it to reach that branch (the gateway path is covered elsewhere).
+	a.Gateway = nil
+
 	// The chat route exists: a GET on it is a 405 (method mismatch), proving
 	// the POST route is mounted rather than 404.
 	req := httptest.NewRequest(http.MethodGet, "/v1/chat/completions", nil)
@@ -681,6 +686,9 @@ func TestHandlerRefusesInsecurePassthrough(t *testing.T) {
 		t.Fatalf("Build must tolerate an insecure upstream: %v", err)
 	}
 	defer func() { _ = a.Close() }()
+
+	// Target the legacy passthrough branch (wired only when the gateway is nil).
+	a.Gateway = nil
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
 	req.RemoteAddr = "127.0.0.1:1234"

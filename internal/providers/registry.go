@@ -110,3 +110,30 @@ func (r *Registry) IDs() []domain.ProviderID {
 	}
 	return out
 }
+
+// Has reports whether a family is registered. It satisfies the allowlist check
+// the combo validator performs (combos.ProviderSet), keeping the registry as the
+// single source of truth for "known provider" (ADR-0013 §3.6 / SEC-10).
+func (r *Registry) Has(id domain.ProviderID) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.families[id]
+	return ok
+}
+
+// DeclaresModel reports whether ANY registered family declares the model via
+// Capabilities(model) ok=true. A family that does not know the model reports
+// ok=false (ADR-0001), so this is exactly "the model is routable".
+func (r *Registry) DeclaresModel(model domain.ModelID) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, family := range r.families {
+		if family == nil {
+			continue
+		}
+		if _, ok := family.Capabilities(model); ok {
+			return true
+		}
+	}
+	return false
+}

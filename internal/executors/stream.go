@@ -129,6 +129,13 @@ func (s *sseStream) Recv() (contracts.Chunk, error) {
 		if len(data) == 0 && event == "" && id == "" {
 			continue
 		}
+		// The `[DONE]` sentinel is the TERMINATOR, not a chunk (D-01): consume
+		// it and return a clean EOF so no consumer ever sees `[DONE]` as data.
+		// The check is shared with the CloudCode decoder via contracts.IsSSEDone
+		// so the two cannot diverge.
+		if event == "" && contracts.IsSSEDone(data) {
+			return contracts.Chunk{}, s.record(io.EOF)
+		}
 		return contracts.Chunk{Data: data, Event: event, ID: id}, nil
 	}
 }

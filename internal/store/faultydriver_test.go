@@ -41,6 +41,32 @@ type faultDriverConfig struct {
 	failClose bool
 	// failPing makes Ping report an error.
 	failPing bool
+	// zeroRowsAffected makes Exec report that zero rows changed, exercising the
+	// "combo not found on update/delete" branch.
+	zeroRowsAffected bool
+	// combosRow makes a combos SELECT return one valid row, so a caller reaches
+	// the code past a successful read (e.g. the RowsAffected==0 update branch).
+	combosRow bool
+	// combosBadRow makes a combos SELECT return one row whose body is invalid
+	// JSON, reaching scanCombo's decode-error branch.
+	combosBadRow bool
+	// quotaRow makes a quota_windows SELECT return one valid 6-column row.
+	quotaRow bool
+	// quotaOneColRow makes a quota_windows SELECT return a 1-column row, so the
+	// 6-destination scan fails.
+	quotaOneColRow bool
+	// quotaRowsErr makes a quota_windows SELECT yield one clean row then error,
+	// so rows.Err() is non-nil.
+	quotaRowsErr bool
+	// quotaBadResets makes the quota row carry an unparsable resets_at.
+	quotaBadResets bool
+	// quotaBadUpdated makes the quota row carry an unparsable updated_at.
+	quotaBadUpdated bool
+	// usageRow makes a usage_attempts SELECT return one valid 7-column row.
+	usageRow bool
+	// usageOneColRow makes a usage_attempts SELECT return a 1-column row, so the
+	// 7-destination scan fails.
+	usageOneColRow bool
 }
 
 type faultConnector struct{ cfg faultDriverConfig }
@@ -94,6 +120,9 @@ func (c *faultConn) ExecContext(_ context.Context, q string, _ []driver.NamedVal
 	if c.cfg.failRowsAffected {
 		return &errResult{}, nil
 	}
+	if c.cfg.zeroRowsAffected {
+		return driver.RowsAffected(0), nil
+	}
 	return driver.RowsAffected(1), nil
 }
 
@@ -128,6 +157,42 @@ func (c *faultConn) QueryContext(_ context.Context, q string, args []driver.Name
 		}
 		return &oneCredRow{}, nil
 	}
+	// A combos SELECT gets one valid 7-column row when combosRow is set, so an
+	// update can reach the RowsAffected==0 branch. With failRowsNext it yields
+	// one clean row then errors, so List reaches the rows.Err() branch.
+	if strings.Contains(q, "FROM combos") {
+		if c.cfg.failRowsNext {
+			return &comboRowsErr{}, nil
+		}
+		if c.cfg.combosBadRow {
+			return &oneComboBadRow{}, nil
+		}
+		if c.cfg.combosRow {
+			return &oneComboRow{}, nil
+		}
+	}
+	// A quota_windows SELECT gets one valid 6-column row so the snapshot paths
+	// past a successful scan are reachable.
+	if strings.Contains(q, "FROM quota_windows") {
+		if c.cfg.quotaRowsErr {
+			return &quotaRowsErr{}, nil
+		}
+		if c.cfg.quotaOneColRow {
+			return &oneRow{value: "x"}, nil
+		}
+		if c.cfg.quotaRow || c.cfg.quotaBadResets || c.cfg.quotaBadUpdated {
+			return &oneQuotaRow{badResets: c.cfg.quotaBadResets, badUpdated: c.cfg.quotaBadUpdated}, nil
+		}
+	}
+	// A usage_attempts SELECT gets one valid 7-column row for GetAttempt.
+	if strings.Contains(q, "FROM usage_attempts") {
+		if c.cfg.usageOneColRow {
+			return &oneRow{value: "x"}, nil
+		}
+		if c.cfg.usageRow {
+			return &oneUsageRow{}, nil
+		}
+	}
 	return &emptyRows{}, nil
 }
 
@@ -152,6 +217,82 @@ func (r *credRows) Next(dest []driver.Value) error {
 	return errInjected
 }
 
+// oneComboRow yields a single valid 7-column combo row.
+type oneComboRow struct{ done bool }
+
+func (r *oneComboRow) Columns() []string {
+	return []string{"name", "schema_ver", "policy", "body", "depth", "created_at", "updated_at"}
+}
+func (r *oneComboRow) Close() error { return nil }
+func (r *oneComboRow) Next(dest []driver.Value) error {
+	if r.done {
+		return io.EOF
+	}
+	r.done = true
+	for i := range dest {
+		dest[i] = ""
+	}
+	dest[0] = "existing"
+	dest[1] = int64(2)
+	dest[2] = "auto"
+	dest[3] = "[]"
+	dest[4] = int64(0)
+	dest[5] = "2026-01-01T00:00:00Z"
+	dest[6] = "2026-01-01T00:00:00Z"
+	return nil
+}
+
+// oneComboBadRow yields one combo row whose body is invalid JSON.
+type oneComboBadRow struct{ done bool }
+
+func (r *oneComboBadRow) Columns() []string {
+	return []string{"name", "schema_ver", "policy", "body", "depth", "created_at", "updated_at"}
+}
+func (r *oneComboBadRow) Close() error { return nil }
+func (r *oneComboBadRow) Next(dest []driver.Value) error {
+	if r.done {
+		return io.EOF
+	}
+	r.done = true
+	for i := range dest {
+		dest[i] = ""
+	}
+	dest[0] = "bad"
+	dest[1] = int64(2)
+	dest[2] = "auto"
+	dest[3] = "{not json"
+	dest[4] = int64(0)
+	dest[5] = "2026-01-01T00:00:00Z"
+	dest[6] = "2026-01-01T00:00:00Z"
+	return nil
+}
+
+// comboRowsErr yields one valid combo row then errors on the next Next call, so
+// scanning succeeds and rows.Err() is non-nil.
+type comboRowsErr struct{ step int }
+
+func (r *comboRowsErr) Columns() []string {
+	return []string{"name", "schema_ver", "policy", "body", "depth", "created_at", "updated_at"}
+}
+func (r *comboRowsErr) Close() error { return nil }
+func (r *comboRowsErr) Next(dest []driver.Value) error {
+	if r.step == 0 {
+		r.step++
+		for i := range dest {
+			dest[i] = ""
+		}
+		dest[0] = "existing"
+		dest[1] = int64(2)
+		dest[2] = "auto"
+		dest[3] = "[]"
+		dest[4] = int64(0)
+		dest[5] = "2026-01-01T00:00:00Z"
+		dest[6] = "2026-01-01T00:00:00Z"
+		return nil
+	}
+	return errInjected
+}
+
 // oneCredRow yields a single valid credential row.
 type oneCredRow struct{ done bool }
 
@@ -170,6 +311,83 @@ func (r *oneCredRow) Next(dest []driver.Value) error {
 	dest[0] = "id-1"
 	dest[1] = "z.ai"
 	dest[2] = "api_key"
+	return nil
+}
+
+// oneQuotaRow yields a single valid 6-column quota_windows row. It can carry a
+// malformed timestamp to reach the parse-error branches.
+type oneQuotaRow struct {
+	done       bool
+	badResets  bool
+	badUpdated bool
+}
+
+func (r *oneQuotaRow) Columns() []string {
+	return []string{"kind", "used", "limit_value", "resets_at", "source", "updated_at"}
+}
+func (r *oneQuotaRow) Close() error { return nil }
+func (r *oneQuotaRow) Next(dest []driver.Value) error {
+	if r.done {
+		return io.EOF
+	}
+	r.done = true
+	dest[0] = int64(0) // short
+	dest[1] = 10.0
+	dest[2] = 100.0
+	if r.badResets {
+		dest[3] = "not-a-time"
+	} else {
+		dest[3] = "2026-09-22T12:00:00Z"
+	}
+	dest[4] = int64(2)
+	if r.badUpdated {
+		dest[5] = "not-a-time"
+	} else {
+		dest[5] = "2026-09-22T12:00:00Z"
+	}
+	return nil
+}
+
+// quotaRowsErr yields one valid quota row then errors on the next Next call.
+type quotaRowsErr struct{ step int }
+
+func (r *quotaRowsErr) Columns() []string {
+	return []string{"kind", "used", "limit_value", "resets_at", "source", "updated_at"}
+}
+func (r *quotaRowsErr) Close() error { return nil }
+func (r *quotaRowsErr) Next(dest []driver.Value) error {
+	if r.step == 0 {
+		r.step++
+		dest[0] = int64(0)
+		dest[1] = 10.0
+		dest[2] = 100.0
+		dest[3] = ""
+		dest[4] = int64(0)
+		dest[5] = "2026-09-22T12:00:00Z"
+		return nil
+	}
+	return errInjected
+}
+
+// oneUsageRow yields a single valid 7-column usage_attempts row.
+type oneUsageRow struct{ done bool }
+
+func (r *oneUsageRow) Columns() []string {
+	return []string{"credential_id", "provider_id", "model", "tokens", "requests", "cost_micros", "outcome"}
+}
+func (r *oneUsageRow) Close() error { return nil }
+func (r *oneUsageRow) Next(dest []driver.Value) error {
+	if r.done {
+		return io.EOF
+	}
+	r.done = true
+	dest[0] = "acct-1"
+	dest[1] = "zai"
+	dest[2] = "glm"
+	dest[3] = int64(120)
+	dest[4] = int64(1)
+	dest[5] = int64(7)
+	dest[6] = "ok"
 	return nil
 }
 

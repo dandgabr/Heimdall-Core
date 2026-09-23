@@ -64,15 +64,16 @@ func sampleCredential(t *testing.T, sec *secret.Store, id, token string) contrac
 	}
 }
 
-func TestMigration0002CreatesCredentials(t *testing.T) {
+func TestLatestMigrationCreatesSchema(t *testing.T) {
 	st, _, _ := newTestVault(t, filepath.Join(t.TempDir(), "heimdall.db"), "material")
 
 	version, found, err := st.GetMeta(SchemaVersionKey)
 	if err != nil || !found {
 		t.Fatalf("schema_version missing: %v", err)
 	}
-	if version != "2" {
-		t.Fatalf("schema_version = %q, want 2", version)
+	// The latest embedded migration is 0004_quota. A new migration bumps this.
+	if version != "4" {
+		t.Fatalf("schema_version = %q, want 4", version)
 	}
 
 	// Idempotence: a second Migrate must not change anything.
@@ -83,9 +84,18 @@ func TestMigration0002CreatesCredentials(t *testing.T) {
 		t.Errorf("schema_version drifted: %q -> %q", version, again)
 	}
 
-	// The table is usable.
+	// The tables are usable.
 	if _, err := st.read.Query(`SELECT id FROM credentials`); err != nil {
 		t.Fatalf("credentials table unusable: %v", err)
+	}
+	if _, err := st.read.Query(`SELECT name FROM combos`); err != nil {
+		t.Fatalf("combos table unusable: %v", err)
+	}
+	if _, err := st.read.Query(`SELECT credential_id FROM quota_windows`); err != nil {
+		t.Fatalf("quota_windows table unusable: %v", err)
+	}
+	if _, err := st.read.Query(`SELECT attempt_key FROM usage_attempts`); err != nil {
+		t.Fatalf("usage_attempts table unusable: %v", err)
 	}
 }
 

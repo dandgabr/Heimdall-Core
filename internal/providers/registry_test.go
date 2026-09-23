@@ -63,6 +63,48 @@ func TestRegistryRejectsDuplicatesNilAndEmpty(t *testing.T) {
 	assertCode(t, err, domain.CodeProviderInvalid)
 }
 
+// TestRegistryAllowlistQuery covers the Has/DeclaresModel methods that satisfy
+// combos.ProviderSet (the combo allowlist, ADR-0013 §3.6).
+func TestRegistryAllowlistQuery(t *testing.T) {
+	r := NewRegistry()
+	f, err := NewOpenAICompat(OpenAICompatOptions{
+		ID: "z.ai",
+		Models: map[domain.ModelID]ModelCapabilities{
+			"glm-5": {Capabilities: contracts.Capabilities(0).Add(contracts.CapStream)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewOpenAICompat: %v", err)
+	}
+	if err := r.Register(f); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	if !r.Has("z.ai") {
+		t.Error("Has(z.ai) = false")
+	}
+	if r.Has("ghost") {
+		t.Error("Has(ghost) = true")
+	}
+	if !r.DeclaresModel("glm-5") {
+		t.Error("DeclaresModel(glm-5) = false")
+	}
+	if r.DeclaresModel("ghost") {
+		t.Error("DeclaresModel(ghost) = true")
+	}
+}
+
+// TestDeclaresModelSkipsNil covers the nil-family guard in DeclaresModel.
+func TestDeclaresModelSkipsNil(t *testing.T) {
+	r := NewRegistry()
+	// Inject a nil family directly (Register rejects nil, but the guard must
+	// still hold if the map is ever populated another way).
+	r.families["nil"] = nil
+	if r.DeclaresModel("glm-5") {
+		t.Error("DeclaresModel with a nil family = true")
+	}
+}
+
 func TestRegistryGetMissing(t *testing.T) {
 	r := NewRegistry()
 	_, err := r.Get("nope")
