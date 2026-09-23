@@ -48,6 +48,7 @@ import (
 	"github.com/dandgabr/heimdall-core/internal/router"
 	"github.com/dandgabr/heimdall-core/internal/secret"
 	"github.com/dandgabr/heimdall-core/internal/store"
+	"github.com/dandgabr/heimdall-core/internal/webui"
 )
 
 // App holds the assembled components of a running instance.
@@ -1403,6 +1404,13 @@ func (a *App) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	openai.New(a.Bundle).Register(mux)
+	// The embedded management GUI (a Svelte SPA) is served from the same mux
+	// under /web/, so it inherits the catch-all LocalOnly and HostGuard guards
+	// by construction (ADR-SEC-06). It is a READ-class asset surface: the
+	// browser must load the login screen before it can present a token, and the
+	// assets carry no secret. The SPA authenticates every /api/mgmt/* call with
+	// the management token in the Authorization header (never a cookie).
+	webui.New().Register(mux)
 	// The management API is built over the App's own adapter: every /api/mgmt/
 	// route (the whole subtree) requires the management token, mounted as ONE
 	// authenticated sub-mux so a route added later inherits the guard by

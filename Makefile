@@ -47,7 +47,23 @@ GOVULNCHECK_VERSION  ?= v1.8.0
 # suítes da fase estiverem completas.
 COVER_MIN ?= 98
 
-.PHONY: build test vet lint race cover cover-check vuln dist clean
+# --- GUI web embutida (F5.2b) -----------------------------------------------
+#
+# `web/` é um projeto Svelte/Vite que builda para `internal/webui/dist/`, o
+# diretório que `//go:embed dist` embute no binário. O `dist/` buildado é
+# COMMITADO, então `go build` funciona sem Node instalado; `make web` regenera
+# o dist/ a partir do fonte quando a SPA muda.
+#
+# Gerenciador: pnpm (lockfile pnpm-lock.yaml). Sobrescreva com
+# `make web PKG_MGR=npm` se o ambiente só tiver npm.
+PKG_MGR ?= pnpm
+WEB_DIR := web
+
+# node_modules é pré-requisito só quando ausente: um build repetido não
+# reinstala; `pnpm install` (ou npm install) é a fonte do lockfile.
+NODE_MODULES := $(WEB_DIR)/node_modules
+
+.PHONY: build test vet lint race cover cover-check vuln dist clean web web-deps web-test
 
 # build: compila o binário local em bin/ (estático, sem cgo)
 build:
@@ -126,3 +142,18 @@ dist:
 # clean: remove artefatos de build, dist e cobertura
 clean:
 	rm -rf $(BIN_DIR) $(DIST_DIR) $(COVERAGE)
+
+# web-deps: instala as dependências da SPA (idempotente).
+web-deps: $(NODE_MODULES)
+
+$(NODE_MODULES): $(WEB_DIR)/package.json $(WEB_DIR)/pnpm-lock.yaml
+	cd $(WEB_DIR) && $(PKG_MGR) install
+
+# web: builda a SPA para internal/webui/dist/ (o diretório embutido pelo Go).
+# Sem Node, `go build` continua funcionando com o dist/ commitado.
+web: $(NODE_MODULES)
+	cd $(WEB_DIR) && $(PKG_MGR) run build
+
+# web-test: testes de contrato da SPA (Node test runner, sem DOM).
+web-test: $(NODE_MODULES)
+	cd $(WEB_DIR) && $(PKG_MGR) test

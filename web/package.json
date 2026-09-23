@@ -1,0 +1,21 @@
+{
+  "name": "heimdall-web",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Heimdall-Core embedded management GUI (Svelte SPA).",
+  "scripts": {
+    "sync:catalogs": "node scripts/sync-catalogs.mjs",
+    "prebuild": "npm run sync:catalogs",
+    "build": "vite build",
+    "dev": "vite",
+    "preview": "vite preview",
+    "pretest": "npm run sync:catalogs",
+    "test": "node --test 'test/*.test.mjs'"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "7.3.1",
+    "svelte": "5.57.1",
+    "vite": "8.3.0"
+  }
+}

@@ -44,6 +44,8 @@ o do pipeline.
 | `cover` | `go test -race -covermode=atomic -coverprofile=coverage.out ./...` + resumo |
 | `cover-check` | como `cover`, mas falha se o total ficar abaixo de `COVER_MIN` (padrão 98%) |
 | `vuln` | `govulncheck ./...` |
+| `web` | builda a SPA Svelte em `internal/webui/dist/` (requer Node/pnpm) |
+| `web-test` | testes de contrato da SPA (`node --test`) |
 | `dist` | cross-compile estático para `PLATFORMS` |
 | `clean` | remove `bin/`, `dist/` e `coverage.out` |
 
@@ -52,6 +54,31 @@ Para reproduzir o pipeline do CI (`.github/workflows/ci.yml`) do começo ao fim:
 ```sh
 make vet lint race cover-check vuln
 ```
+
+### GUI web embutida (F5.2b)
+
+A Management API é consumida por uma SPA Svelte embutida no próprio binário
+(`internal/webui`, via `//go:embed dist`). **Não há Tauri/Wails nem runtime
+extra**: o `net/http` serve os assets e a mesma porta/loopback do gateway
+(ADR-002). A SPA é servida em `http://127.0.0.1:8787/web/` e cobre Status,
+Provedores, Credenciais, Combos, Cotas, Gates, Uso, Token de gestão e Chaves de
+cliente, com i18n `pt-BR`/`en` (os `code` de erro do backend são traduzidos
+pelos mesmos catálogos que o servidor embute).
+
+- **Autenticação:** a SPA envia o token de gestão no header
+  `Authorization: Bearer <token>` (nunca cookie, nunca query); o token fica em
+  memória/sessão do navegador e é revalidado no boot. CORS fechado; a SPA só
+  chama a própria origem.
+- **Build:** o `dist/` buildado é **commitado**, então `go build`/`make build`
+  funciona numa máquina sem Node. Para regenerar após mudar a SPA:
+
+  ```sh
+  make web          # pnpm install + build em web/ -> internal/webui/dist/
+  make web-test     # testes de contrato da SPA
+  ```
+
+  O gerenciador padrão é `pnpm` (`make web PKG_MGR=npm` se o ambiente só tiver
+  npm). O código-fonte fica em `web/` (Svelte 5 + Vite).
 
 ### Estado atual
 

@@ -29,3 +29,11 @@ coverage.html
 # .maestri/roles/<id>/.commandcode/).
 .maestri/
 .commandcode/
+
+# Dependências da SPA (F5.2b). internal/webui/dist/ É commitado de propósito:
+# `go build` embute o build e precisa dele sem Node instalado. Regenere com
+# `make web`.
+web/node_modules/
+# Catálogos gerados da SPA: derivados dos catálogos do backend + rótulos gui.*;
+# regenerados por `npm run prebuild`/`pretest` (portanto por `make web`).
+web/src/i18n/generated/
