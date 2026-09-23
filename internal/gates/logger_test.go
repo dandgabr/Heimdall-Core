@@ -112,6 +112,49 @@ func TestLoggerGateContractShape(t *testing.T) {
 	}
 }
 
+// TestLoggerDerivedBranches covers metadataOf's three shapes: a Derived WITH a
+// preallocated Fields map (reused directly), a Derived WITHOUT one (identity
+// fields filled in, no header join), and no Derived (fall back to the input).
+func TestLoggerDerivedBranches(t *testing.T) {
+	var last map[string]string
+	g := NewLogger(func(_ string, fields map[string]string) { last = fields })
+
+	// (a) Derived with Fields: reused verbatim.
+	withFields := &contracts.Derived{Fields: map[string]string{"request_id": "r", "custom": "x"}}
+	if _, err := g.PreRequest(context.Background(), contracts.GateInput{Derived: withFields}); err != nil {
+		t.Fatalf("PreRequest: %v", err)
+	}
+	if last["custom"] != "x" {
+		t.Fatalf("Derived.Fields not reused: %+v", last)
+	}
+
+	// (b) Derived without Fields: identity copied, header name from Derived.
+	noFields := &contracts.Derived{RequestID: "r2", Provider: "p", Credential: "c", Model: "m", HeaderNames: "A,B"}
+	if _, err := g.PreRequest(context.Background(), contracts.GateInput{Derived: noFields}); err != nil {
+		t.Fatalf("PreRequest: %v", err)
+	}
+	if last["request_id"] != "r2" || last["header_names"] != "A,B" {
+		t.Fatalf("Derived-without-Fields = %+v", last)
+	}
+	// A Derived with no header names omits the key entirely.
+	if _, err := g.PreRequest(context.Background(), contracts.GateInput{Derived: &contracts.Derived{RequestID: "r3"}}); err != nil {
+		t.Fatalf("PreRequest: %v", err)
+	}
+	if _, ok := last["header_names"]; ok {
+		t.Fatalf("empty header names leaked a key: %+v", last)
+	}
+
+	// (c) No Derived: fall back to the input headers.
+	if _, err := g.PreRequest(context.Background(), contracts.GateInput{
+		RequestID: "r4", Headers: http.Header{"Authorization": {"secret"}},
+	}); err != nil {
+		t.Fatalf("PreRequest: %v", err)
+	}
+	if last["header_names"] != "Authorization" {
+		t.Fatalf("fallback header names = %+v", last)
+	}
+}
+
 func TestLoggerGateAlwaysContinues(t *testing.T) {
 	g := NewLogger(nil)
 	d, err := g.PreRequest(context.Background(), sampleInput("token-value"))

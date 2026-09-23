@@ -751,6 +751,36 @@ func TestRecorderConcurrentRecordsWithPersistenceAreRaceFree(t *testing.T) {
 	}
 }
 
+// TestRecorderConcurrentRecordAndSnapshotAreRaceFree is the regression for the
+// second fusion-fan-out race: a reader (Snapshot, the preflight filter) runs
+// concurrently with a writer (Record) on the SAME credential. Run under -race it
+// fails if Snapshot clones st.Windows after releasing the credential lock.
+func TestRecorderConcurrentRecordAndSnapshotAreRaceFree(t *testing.T) {
+	clock := newClock()
+	rec := NewRecorder(newFakePersistence(), tokenCfg(clock))
+	cred := domain.CredentialID("acct")
+
+	const n = 50
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		wg.Add(2)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			_ = rec.Record(context.Background(), contracts.OutcomeSuccess,
+				usageInput(cred, "w"+string(rune('a'+i%26))+string(rune('0'+i/26)), 1))
+		}(i)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, _ = rec.Snapshot(context.Background(), cred)
+		}()
+	}
+	close(start)
+	wg.Wait()
+}
+
 // TestRecorderConcurrentRecordsAreRaceFree exercises the per-credential lock
 // under -race with distinct attempt keys (so all contributions count).
 func TestRecorderConcurrentRecordsAreRaceFree(t *testing.T) {

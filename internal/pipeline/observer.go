@@ -22,6 +22,14 @@ import (
 // security middleware uses.
 type Observer struct {
 	chain *Chain
+	// Skip, when set, excludes a request from THIS observer's chain pass. It
+	// exists for routes whose own handler drives the chain itself (the
+	// inference gateway runs PreRequest, the chunk stage and PostResponse):
+	// without it a stateful gate would observe those requests TWICE — the
+	// F4 rate limiter made the double-count observable. Metadata-only gates
+	// (the logger) were immune, which is why the duplication survived the
+	// earlier waves.
+	Skip func(*http.Request) bool
 }
 
 // NewObserver builds the observer over a chain. A nil chain is a programming
@@ -40,6 +48,11 @@ func NewObserver(chain *Chain) (*Observer, error) {
 // Handler returns the middleware.
 func (o *Observer) Handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if o.Skip != nil && o.Skip(r) {
+			// The route's handler owns this request's chain execution.
+			next.ServeHTTP(w, r)
+			return
+		}
 		requestID := domain.RequestID(w.Header().Get("X-Request-ID"))
 		if requestID == "" {
 			requestID = domain.NewRequestID()
@@ -70,6 +83,11 @@ func (o *Observer) Handler(next http.Handler) http.Handler {
 			// gate is FailOpen, so this path exists for completeness.
 			http.Error(w, "gate chain rejected the request", http.StatusForbidden)
 			return
+		}
+		// Reuse the request-scoped Derived the chain computed once (ADR-0014
+		// §6) in PostResponse, so metadata is never rebuilt.
+		if decision.Derived != nil {
+			in.Derived = decision.Derived
 		}
 		if decision.Kind == contracts.DecisionBlock || decision.Kind == contracts.DecisionReroute {
 			// Neither is meaningful at this metadata-only boundary yet; refuse

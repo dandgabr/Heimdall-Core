@@ -67,6 +67,21 @@ type faultDriverConfig struct {
 	// usageOneColRow makes a usage_attempts SELECT return a 1-column row, so the
 	// 7-destination scan fails.
 	usageOneColRow bool
+	// failNthExec fails the Nth ExecContext call on the connection (1-based),
+	// for statement sequences whose texts are indistinguishable by substring
+	// (e.g. the memory insert pair).
+	failNthExec int
+	// memoryRow makes the memory search SELECT return one valid 6-column row.
+	memoryRow bool
+	// memoryOneColRow makes the memory search SELECT return a 1-column row, so
+	// the 6-destination scan fails.
+	memoryOneColRow bool
+	// memoryBadCreated makes the memory row carry an unparsable created_at.
+	memoryBadCreated bool
+	// memoryBadExpires makes the memory row carry an unparsable expires_at.
+	memoryBadExpires bool
+	// memoryRowsErr makes the memory search yield one clean row then error.
+	memoryRowsErr bool
 }
 
 type faultConnector struct{ cfg faultDriverConfig }
@@ -80,7 +95,10 @@ type faultDriver struct{}
 
 func (faultDriver) Open(string) (driver.Conn, error) { return &faultConn{}, nil }
 
-type faultConn struct{ cfg faultDriverConfig }
+type faultConn struct {
+	cfg       faultDriverConfig
+	execCount int
+}
 
 func (c *faultConn) Prepare(string) (driver.Stmt, error) { return nil, driver.ErrSkip }
 func (c *faultConn) Close() error {
@@ -114,7 +132,8 @@ func (c *faultConn) fails(q string) bool {
 }
 
 func (c *faultConn) ExecContext(_ context.Context, q string, _ []driver.NamedValue) (driver.Result, error) {
-	if c.fails(q) {
+	c.execCount++
+	if c.fails(q) || (c.cfg.failNthExec > 0 && c.execCount == c.cfg.failNthExec) {
 		return nil, errInjected
 	}
 	if c.cfg.failRowsAffected {
@@ -182,6 +201,19 @@ func (c *faultConn) QueryContext(_ context.Context, q string, args []driver.Name
 		}
 		if c.cfg.quotaRow || c.cfg.quotaBadResets || c.cfg.quotaBadUpdated {
 			return &oneQuotaRow{badResets: c.cfg.quotaBadResets, badUpdated: c.cfg.quotaBadUpdated}, nil
+		}
+	}
+	// The memory search SELECT gets one 6-column row per the configured knobs,
+	// so the scan/parse/rowsErr branches are reachable.
+	if strings.Contains(q, "memories_fts MATCH") {
+		if c.cfg.memoryRowsErr {
+			return &memoryRowsErrRows{}, nil
+		}
+		if c.cfg.memoryOneColRow {
+			return &oneRow{value: "x"}, nil
+		}
+		if c.cfg.memoryRow || c.cfg.memoryBadCreated || c.cfg.memoryBadExpires {
+			return &oneMemoryRow{badCreated: c.cfg.memoryBadCreated, badExpires: c.cfg.memoryBadExpires}, nil
 		}
 	}
 	// A usage_attempts SELECT gets one valid 7-column row for GetAttempt.
@@ -429,6 +461,61 @@ func (r *oneRow) Next(dest []driver.Value) error {
 	r.done = true
 	dest[0] = r.value
 	return nil
+}
+
+// oneMemoryRow yields a single valid 6-column memories-search row. It can
+// carry malformed timestamps to reach the parse-error branches.
+type oneMemoryRow struct {
+	done       bool
+	badCreated bool
+	badExpires bool
+}
+
+func (r *oneMemoryRow) Columns() []string {
+	return []string{"id", "content", "provenance", "turn_id", "created_at", "expires_at"}
+}
+func (r *oneMemoryRow) Close() error { return nil }
+func (r *oneMemoryRow) Next(dest []driver.Value) error {
+	if r.done {
+		return io.EOF
+	}
+	r.done = true
+	dest[0] = "m-1"
+	dest[1] = "the deploy window is tuesday"
+	dest[2] = int64(0)
+	dest[3] = "req-1"
+	if r.badCreated {
+		dest[4] = "not-a-time"
+	} else {
+		dest[4] = "2026-09-22T12:00:00Z"
+	}
+	if r.badExpires {
+		dest[5] = "not-a-time"
+	} else {
+		dest[5] = "2026-09-23T12:00:00Z"
+	}
+	return nil
+}
+
+// memoryRowsErrRows yields one valid memory row then errors on the next Next.
+type memoryRowsErrRows struct{ step int }
+
+func (r *memoryRowsErrRows) Columns() []string {
+	return []string{"id", "content", "provenance", "turn_id", "created_at", "expires_at"}
+}
+func (r *memoryRowsErrRows) Close() error { return nil }
+func (r *memoryRowsErrRows) Next(dest []driver.Value) error {
+	if r.step == 0 {
+		r.step++
+		dest[0] = "m-1"
+		dest[1] = "content"
+		dest[2] = int64(0)
+		dest[3] = "req-1"
+		dest[4] = "2026-09-22T12:00:00Z"
+		dest[5] = "2026-09-23T12:00:00Z"
+		return nil
+	}
+	return errInjected
 }
 
 // faultyDB builds a *sql.DB backed by the fault driver.

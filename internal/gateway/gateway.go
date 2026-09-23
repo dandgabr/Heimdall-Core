@@ -53,11 +53,14 @@ type ComboLoader interface {
 }
 
 // Chain is the GateChain port: the pre-commit decision, the per-chunk stage and
-// the post-exchange hook.
+// the post-exchange hook, plus whether any gate needs the request body delivered
+// (ADR-SEC-03 §2). *pipeline.Chain satisfies it.
 type Chain interface {
 	PreRequest(ctx context.Context, in contracts.GateInput) (contracts.Decision, error)
 	OnResponseChunk(ctx context.Context, in contracts.ChunkInput) (contracts.ChunkDecision, error)
 	PostResponse(ctx context.Context, in contracts.GateInput) error
+	// ConsumesRequestBody reports whether any pre-request gate needs the body.
+	ConsumesRequestBody() bool
 }
 
 // Handler serves the chat completions route.
@@ -83,9 +86,14 @@ type domainIDGen struct{}
 
 func (domainIDGen) NewRequestID() domain.RequestID { return domain.NewRequestID() }
 
+// ChatCompletionsPath is the route the gateway mounts (POST). It is exported
+// so the composition root can exclude the route from the metadata-only
+// observer, whose chain pass would otherwise duplicate the gateway's own.
+const ChatCompletionsPath = "/v1/chat/completions"
+
 // Register mounts POST /v1/chat/completions.
 func (h *Handler) Register(mux *http.ServeMux) {
-	mux.HandleFunc("POST /v1/chat/completions", h.chat)
+	mux.HandleFunc("POST "+ChatCompletionsPath, h.chat)
 }
 
 // parsed is the minimal view the gateway needs from the canonical body.
@@ -151,6 +159,19 @@ func (h *Handler) chat(w http.ResponseWriter, r *http.Request) {
 		Headers:   headerNamesOnly(r.Header),
 		Meta:      map[string]string{"http.path": r.URL.Path},
 	}
+	// The client identity the request PRESENTS (never validated here — that is
+	// F5/BD-01) keys the stateful gates: the rate limiter's per-key bucket and
+	// the memory namespace (ADR-SEC-07 §3). Absent identity stays absent: no
+	// gate may invent a shared identity for the client.
+	if key := ClientKeyFromHeaders(r.Header); key != "" {
+		gateIn.Meta[ClientKeyMeta] = key
+	}
+	// The body is delivered ONLY when a gate declared it needs it (ADR-SEC-03
+	// §2): the token gate compresses the prompt, so it implements BodyConsumer.
+	// Every other boundary (observer, gated executor) leaves Body nil.
+	if h.chain != nil && h.chain.ConsumesRequestBody() {
+		gateIn.Body = body
+	}
 
 	// PreRequest: a Block returns its Synthetic as a successful response (a
 	// cache hit or a policy denial), a Reroute is refused until the allowlist
@@ -160,6 +181,11 @@ func (h *Handler) chat(w http.ResponseWriter, r *http.Request) {
 		if cerr != nil {
 			writeError(w, r, cerr)
 			return
+		}
+		// Reuse the request-scoped Derived the chain computed once (ADR-0014
+		// §6) in every later stage, so the chunk path never recomputes it.
+		if decision.Derived != nil {
+			gateIn.Derived = decision.Derived
 		}
 		switch decision.Kind {
 		case contracts.DecisionBlock:
@@ -179,6 +205,12 @@ func (h *Handler) chat(w http.ResponseWriter, r *http.Request) {
 					wire.Model = p2.Model
 					req.Model = p2.Model
 				}
+			}
+			// A gate may also rewrite request headers (the executor forwards
+			// WireRequest.Headers). Applying them here keeps a Modify's intent
+			// whole instead of dropping the header half.
+			if decision.Headers != nil {
+				wire.Headers = decision.Headers
 			}
 		}
 	}
@@ -258,6 +290,7 @@ func (h *Handler) stream(w http.ResponseWriter, r *http.Request, wire contracts.
 				Index:     index,
 				Committed: true,
 				Meta:      gateIn.Meta,
+				Derived:   gateIn.Derived,
 			})
 			index++
 			if ge != nil {

@@ -12,6 +12,7 @@ Referências normativas: **ADR-003** (escopo de segurança do v1) e **ADR-002**
 | ID | Título | Status | Impacto | Bloqueia | Mitigação atual | Gatilho / dono |
 | --- | --- | --- | --- | --- | --- | --- |
 | **P1-6** | Anti-DNS-rebinding/CSRF da Management API e autenticação de cliente em `/v1/*` ausentes | **ABERTA** | Um navegador em origem maliciosa pode alcançar loopback via DNS rebinding (a origem é o navegador da vítima, não um peer remoto, então `LOCAL_ONLY` não basta). Sem autenticação de cliente, `/v1/chat/completions` consumiria a credencial upstream em nome de qualquer processo local que alcance a porta. | **Antes de F5** (ADR-SEC-06, modelo de confiança da Management API) e **antes de expor o gateway** além do uso pessoal local | Bind exclusivo em loopback (`allow-remote=false`), token de gestão de 256 bits comparado em tempo constante, middleware catch-all `LOCAL_ONLY`-antes-de-auth | F5 + **ADR-SEC-06**; ver backlog abaixo |
+| **M-1** | Busca vetorial `vec0` da memória não implementada | **ABERTA** | O gate de memória é **FTS5-only**: o retrieval é lexical, sem similaridade semântica. O `modernc.org/sqlite v1.59.0` não expõe a extensão `vec0`. A ADR-SEC-07 prevê o tier vetorial. | Não bloqueia fase | Degrada para FTS5 sem falhar o boot; embeddings externos são opt-in e pseudonimizados (SEC-07 §4) | Quando o driver expuser `vec0` ou se adotarmos uma extensão/wasm vetorial; ADR-SEC-07 |
 
 ## Resolvidas
 

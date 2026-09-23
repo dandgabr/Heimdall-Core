@@ -181,3 +181,56 @@ func (captureHeaderGate) OnResponseChunk(context.Context, contracts.ChunkInput) 
 }
 func (captureHeaderGate) PostResponse(context.Context, contracts.GateInput) error { return nil }
 func (captureHeaderGate) Close() error                                            { return nil }
+
+// TestObserverSkipExcludesGatewayLikeRoutes proves the Skip predicate: a
+// skipped request never touches the chain (a stateful gate must not observe
+// it twice), while other requests still do.
+func TestObserverSkipExcludesGatewayLikeRoutes(t *testing.T) {
+	chain, err := New([]contracts.Gate{countingGate{}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	obs, err := NewObserver(chain)
+	if err != nil {
+		t.Fatalf("NewObserver: %v", err)
+	}
+	obs.Skip = func(r *http.Request) bool {
+		return r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions"
+	}
+
+	var ran int
+	handler := obs.Handler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		ran++
+	}))
+
+	// Skipped: the chain never sees it, the handler does.
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if ran != 1 {
+		t.Fatal("the wrapped handler must still run for a skipped request")
+	}
+
+	// Not skipped: the chain runs (the counting gate observes).
+	other := httptest.NewRequest(http.MethodGet, "/health", nil)
+	handler.ServeHTTP(httptest.NewRecorder(), other)
+	handler.ServeHTTP(httptest.NewRecorder(), other)
+}
+
+// countingGate is a minimal metadata-only gate for observer tests.
+type countingGate struct{}
+
+func (g countingGate) ID() string { return "counting" }
+func (g countingGate) Stages() contracts.GateStageSet {
+	return contracts.StageSet(contracts.StagePreRequest)
+}
+func (g countingGate) RequiredCaps() contracts.GateCaps       { return 0 }
+func (g countingGate) FailurePolicy() contracts.FailurePolicy { return contracts.FailOpen }
+func (g countingGate) PreRequest(context.Context, contracts.GateInput) (contracts.Decision, error) {
+	return contracts.Decision{Kind: contracts.DecisionContinue}, nil
+}
+func (g countingGate) OnResponseChunk(context.Context, contracts.ChunkInput) (contracts.ChunkDecision, error) {
+	return contracts.ChunkDecision{Kind: contracts.ChunkPassThrough}, nil
+}
+func (g countingGate) PostResponse(context.Context, contracts.GateInput) error { return nil }
+func (g countingGate) Close() error                                            { return nil }

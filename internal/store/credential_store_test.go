@@ -71,9 +71,9 @@ func TestLatestMigrationCreatesSchema(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("schema_version missing: %v", err)
 	}
-	// The latest embedded migration is 0004_quota. A new migration bumps this.
-	if version != "4" {
-		t.Fatalf("schema_version = %q, want 4", version)
+	// The latest embedded migration is 0005_memory. A new migration bumps this.
+	if version != "5" {
+		t.Fatalf("schema_version = %q, want 5", version)
 	}
 
 	// Idempotence: a second Migrate must not change anything.
@@ -84,18 +84,23 @@ func TestLatestMigrationCreatesSchema(t *testing.T) {
 		t.Errorf("schema_version drifted: %q -> %q", version, again)
 	}
 
-	// The tables are usable.
-	if _, err := st.read.Query(`SELECT id FROM credentials`); err != nil {
-		t.Fatalf("credentials table unusable: %v", err)
-	}
-	if _, err := st.read.Query(`SELECT name FROM combos`); err != nil {
-		t.Fatalf("combos table unusable: %v", err)
-	}
-	if _, err := st.read.Query(`SELECT credential_id FROM quota_windows`); err != nil {
-		t.Fatalf("quota_windows table unusable: %v", err)
-	}
-	if _, err := st.read.Query(`SELECT attempt_key FROM usage_attempts`); err != nil {
-		t.Fatalf("usage_attempts table unusable: %v", err)
+	// The tables are usable. Every query CLOSES its rows: the read pool holds
+	// MaxOpenConns(4) connections, and a leaked *Rows holds its connection
+	// until GC — a fifth table check would deadlock the pool otherwise.
+	for _, tc := range []struct {
+		table, column string
+	}{
+		{"credentials", "id"},
+		{"combos", "name"},
+		{"quota_windows", "credential_id"},
+		{"usage_attempts", "attempt_key"},
+		{"memories", "id"},
+	} {
+		rows, err := st.read.Query(`SELECT ` + tc.column + ` FROM ` + tc.table)
+		if err != nil {
+			t.Fatalf("%s table unusable: %v", tc.table, err)
+		}
+		rows.Close()
 	}
 }
 

@@ -144,6 +144,18 @@ const (
 	CodeBreakerOpen     = "breaker.open"
 	CodeBreakerTerminal = "breaker.terminal"
 
+	// security.* — the F4 security gates. A gate denial is delivered as a
+	// DecisionBlock with a SyntheticResponse (never via the dispatcher), so
+	// these codes travel in the synthetic {error:{code,params}} envelope.
+	// Classification (ADR-0002 rule 1): a client-supplied payload that trips a
+	// policy is the REQUEST's fault — ScopeRequest, non-retryable, never
+	// cooldowns a credential or a provider — except rate_limited (429,
+	// retryable after Retry-After).
+	CodeSecurityRateLimited       = "security.rate_limited"
+	CodeSecurityDestinationDenied = "security.destination_denied"
+	CodeSecurityInjectionDetected = "security.injection_detected"
+	CodeSecurityPIIBlocked        = "security.pii_blocked"
+
 	// dispatch.* — the Dispatcher's aggregate outcomes (F3, ADR-0010 §7).
 	// These are produced when the attempt loop ends without a winner; they
 	// inherit the last attempt's classification so the caller/breaker acts on

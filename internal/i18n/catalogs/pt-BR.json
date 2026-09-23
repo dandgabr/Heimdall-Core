@@ -87,5 +87,9 @@
   "provider.reroute_unsupported": "Reroute não está disponível nesta build: {reason}.",
   "provider.api_key_read_failed": "Não foi possível ler a API key: {reason}.",
   "route.fusion_self_judge": "O combo {name} usa fusion com um juiz que resolve para si mesmo (recursão infinita).",
-  "route.fusion_all_failed": "Todos os {panels} painéis da fusion falharam; nada para julgar."
+  "route.fusion_all_failed": "Todos os {panels} painéis da fusion falharam; nada para julgar.",
+  "security.rate_limited": "Muitas requisições para esta chave de cliente; tente novamente após {retry_after} segundos.",
+  "security.destination_denied": "A requisição referencia um destino de rede proibido ({host}).",
+  "security.injection_detected": "A requisição foi recusada pela política de injeção de prompt.",
+  "security.pii_blocked": "A requisição foi recusada por conter dados pessoais ({types})."
 }

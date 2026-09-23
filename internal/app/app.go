@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +34,9 @@ import (
 	"github.com/dandgabr/heimdall-core/internal/egress"
 	"github.com/dandgabr/heimdall-core/internal/executors"
 	"github.com/dandgabr/heimdall-core/internal/gates"
+	"github.com/dandgabr/heimdall-core/internal/gates/memory"
+	"github.com/dandgabr/heimdall-core/internal/gates/security"
+	"github.com/dandgabr/heimdall-core/internal/gates/token"
 	"github.com/dandgabr/heimdall-core/internal/gateway"
 	"github.com/dandgabr/heimdall-core/internal/i18n"
 	"github.com/dandgabr/heimdall-core/internal/importers"
@@ -61,6 +65,10 @@ type App struct {
 	Flows       *auth.FlowFactory
 	// Gates is the frozen gate chain, wired with the F1 logger gate.
 	Gates *pipeline.Chain
+	// GateOrder is the per-stage order the gate registry computed at boot
+	// (ADR-0014 §1). It is diagnostics and test surface: the chain executes
+	// from it, and `gate` diagnostics can print the derived order.
+	GateOrder gates.Order
 
 	// F3 routing layer.
 	Combos     *store.ComboStore
@@ -113,7 +121,17 @@ type appSeams struct {
 	OpenStore   func(string) (*store.Store, error)
 	EnsureToken func(*store.Store) (string, bool, error)
 	NewChain    func([]contracts.Gate) (*pipeline.Chain, error)
-	NewObserver func(*pipeline.Chain) (*pipeline.Observer, error)
+	// NewOrderedChain builds the chain from the per-stage order the gate
+	// registry computed (ADR-0014). It is a seam for the chain-error branch.
+	NewOrderedChain func(pre, chunk, post []contracts.Gate) (*pipeline.Chain, error)
+	NewObserver     func(*pipeline.Chain) (*pipeline.Observer, error)
+	// NewRegistry and BuildGateOrder are seams over the gate engine, so a test
+	// can force a registration/build failure a healthy registry never produces.
+	NewRegistry    func() gateRegistry
+	BuildGateOrder func(gateRegistry) (gates.Order, error)
+	// TokenEngines is a seam over the built-in token engine set, so a test can
+	// inject an incoherent engine and reach buildTokenGate's validation error.
+	TokenEngines func() []token.CompressionEngine
 	// Descriptors supplies the provider descriptors the registry is built from.
 	// It is a seam so a test can feed an invalid or duplicate descriptor and
 	// reach the registry-loop error branches; production uses the fixed set.
@@ -134,12 +152,16 @@ type appSeams struct {
 }
 
 var defaultAppSeams = appSeams{
-	LoadBundle:  i18n.New,
-	OpenStore:   store.Open,
-	EnsureToken: func(s *store.Store) (string, bool, error) { return s.EnsureManagementTokenHash() },
-	NewChain:    pipeline.New,
-	NewObserver: pipeline.NewObserver,
-	Descriptors: auth.Descriptors,
+	LoadBundle:      i18n.New,
+	OpenStore:       store.Open,
+	EnsureToken:     func(s *store.Store) (string, bool, error) { return s.EnsureManagementTokenHash() },
+	NewChain:        pipeline.New,
+	NewOrderedChain: pipeline.NewOrdered,
+	NewObserver:     pipeline.NewObserver,
+	NewRegistry:     func() gateRegistry { return gates.NewRegistry() },
+	BuildGateOrder:  func(r gateRegistry) (gates.Order, error) { return r.Build() },
+	TokenEngines:    token.DefaultEngines,
+	Descriptors:     auth.Descriptors,
 	HasCredentials: func(cs *store.CredentialStore) (bool, error) {
 		creds, err := cs.List(context.Background())
 		if err != nil {
@@ -150,6 +172,13 @@ var defaultAppSeams = appSeams{
 	ShutdownServer: func(s *http.Server, ctx context.Context) error { return s.Shutdown(ctx) },
 	CloseStore:     func(s *store.Store) error { return s.Close() },
 	WireRouting:    func(a *App) error { return a.wireRouting() },
+}
+
+// gateRegistry is the narrow view of *gates.Registry the composition root uses,
+// so the registry and its order build are injectable seams.
+type gateRegistry interface {
+	RegisterGate(name string, factory gates.Factory) error
+	Build() (gates.Order, error)
 }
 
 // appSeam is swapped by tests; never mutated in production.
@@ -839,11 +868,265 @@ type ProviderStatus struct {
 	RiskNotice string
 }
 
-// wireGates builds the gate chain with the trivial logger gate. The sink keeps
-// a bounded in-memory record for tests and mirrors the metadata to the
-// structured logger, so the gate runs in production and is assertable.
+// wireGates builds the gate engine (ADR-0014): it registers the built-in gates
+// that config enables, orders them by the data-dependency graph (once, at boot),
+// logs the EFFECTIVE chain with each gate's failure policy (so disabling a
+// FailClosed gate is visible, §4), and builds the ordered chain.
+//
+// The logger gate is the only F4-wave-1 gate; the token/memory/security gates
+// land in later waves and register here the same way. A gate disabled by config
+// is never constructed (its factory is not called) and never enters the graph.
 func (a *App) wireGates() error {
-	loggerGate := gates.NewLogger(func(stage string, fields map[string]string) {
+	reg := appSeam.NewRegistry()
+
+	// The logger gate is always available (observability, FailOpen). It is pure
+	// observability: it is on unless explicitly disabled per-gate.
+	if a.Config.Features.Gates.GateEnabled("logger", true) {
+		if err := reg.RegisterGate("logger", func() contracts.Gate {
+			return gates.NewLogger(a.gateSink())
+		}); err != nil {
+			return err
+		}
+	}
+
+	// The token gate (ADR-0015) runs only when the token feature is on (its
+	// group switch) and not individually disabled. Its engines are resolved from
+	// the per-engine config; a disabled engine never enters the registry.
+	if a.Config.Features.Gates.GateEnabled("token", a.Config.Features.Gates.Token) {
+		tokenGate, err := a.buildTokenGate()
+		if err != nil {
+			return err
+		}
+		if err := reg.RegisterGate("token", func() contracts.Gate { return tokenGate }); err != nil {
+			return err
+		}
+	}
+
+	// The security gates (F4 wave 4, ADR-SEC-03/04/05): containment (credential
+	// masker, rate limit, SSRF) and final verification (injection guard, PII
+	// masker). EACH gate's enablement is GateEnabled(id, group): an explicit
+	// per-gate entry wins over the group switch in both directions, so the
+	// block always runs and Assemble simply omits every disabled gate.
+	for _, g := range a.buildSecurityGates() {
+		if err := reg.RegisterGate(g.ID(), func() contracts.Gate { return g }); err != nil {
+			return err
+		}
+	}
+
+	// The memory gates (F4 wave 3, ADR-SEC-07): the synchronous retriever
+	// (PreRequest, ordered before the token engine through the context edge)
+	// and the asynchronous writer (PostResponse, off the response path). The
+	// SQLite store is shared; the vector mode stays OFF unless the embeddings
+	// opt-in is configured — its absence never fails the boot.
+	retrieverOn := a.Config.Features.Gates.GateEnabled("memory-retriever", a.Config.Features.Gates.Memory)
+	writerOn := a.Config.Features.Gates.GateEnabled("memory-writer", a.Config.Features.Gates.Memory)
+	if retrieverOn || writerOn {
+		memCfg := a.buildMemoryGateConfig()
+		if retrieverOn {
+			// Cannot be nil here: Disabled is false and the store is wired.
+			retriever := memory.NewRetriever(memCfg)
+			if err := reg.RegisterGate(retriever.ID(), func() contracts.Gate { return retriever }); err != nil {
+				return err
+			}
+		}
+		if writerOn {
+			writer := memory.NewWriter(memCfg)
+			if err := reg.RegisterGate(writer.ID(), func() contracts.Gate { return writer }); err != nil {
+				return err
+			}
+		}
+	}
+
+	order, err := appSeam.BuildGateOrder(reg)
+	if err != nil {
+		return err
+	}
+	a.GateOrder = order
+
+	chain, err := appSeam.NewOrderedChain(order.PreRequest, order.OnResponseChunk, order.PostResponse)
+	if err != nil {
+		return err
+	}
+	a.Gates = chain
+	a.logEffectiveChain(order)
+	return nil
+}
+
+// buildTokenGate resolves the token gate's engines from config and builds it
+// (ADR-0015). Each built-in engine is registered through the ADR-0015 §1
+// validation; a disabled engine is skipped (never registered), and an engine's
+// prefix-rewrite opt-in is passed only when the operator set it.
+//
+// A registration failure (an incoherent engine metadata pair, which the
+// built-ins never produce but a future engine might) fails the boot: the engine
+// registry refuses the lying declaration rather than running a misdeclared
+// engine.
+func (a *App) buildTokenGate() (contracts.Gate, error) {
+	gfeat := a.Config.Features.Gates
+	engReg := token.NewRegistry()
+	for _, e := range appSeam.TokenEngines() {
+		if !gfeat.TokenEngineEnabled(e.ID()) {
+			continue
+		}
+		if err := engReg.Register(e, gfeat.TokenEngineAllowPrefixRewrite(e.ID())); err != nil {
+			return nil, err
+		}
+	}
+	// The opt-in map is derived from the registry so it can only contain engines
+	// actually registered with opt-in.
+	optIn := make(map[string]bool)
+	for _, e := range engReg.Enabled() {
+		if engReg.AllowPrefixRewrite(e.ID()) {
+			optIn[e.ID()] = true
+		}
+	}
+	return token.New(token.Config{
+		Engines: engReg.Enabled(),
+		OptIn:   optIn,
+		Record:  a.tokenStatSink(),
+	}), nil
+}
+
+// buildSecurityGates maps the security parameter block onto the security
+// package's Config and assembles the ENABLED gates (F4 wave 4). The family
+// switch and the per-gate switches both apply: a gate whose per-gate switch is
+// false is disabled in the Config and never constructed (ADR-0014 §4). The
+// policies were validated at config load; unknown values cannot reach here.
+func (a *App) buildSecurityGates() []contracts.Gate {
+	g := a.Config.Features.Gates
+	sec := g.SecurityParams
+	on := func(id string) bool { return g.GateEnabled(id, g.Security) }
+
+	piiPolicy := piiPolicyOf(sec.PIIPolicy)
+	if !on("pii-masker") {
+		// The PII gate's "off" IS its PiiOff policy: the constructor returns
+		// nil and Assemble omits it.
+		piiPolicy = security.PiiOff
+	}
+	cfg := security.Config{
+		DisableCredentialMasker: !on("credential-masker"),
+		PIIMasker:               security.PiiConfig{Policy: piiPolicy},
+		Injection: security.InjectConfig{
+			Disabled: !on("injection-guard"),
+			Policy:   injectPolicyOf(sec.InjectPolicy),
+		},
+		DisableSSRF: !on("ssrf-guard"),
+	}
+	// The throttle joins only when BOTH the switch allows it and the operator
+	// configured a capacity (its burst size has no safe default).
+	if on("rate-limit") && sec.RateLimit.Rate > 0 && sec.RateLimit.Interval > 0 {
+		cfg.RateLimit = security.RateLimitConfig{
+			Rate:     sec.RateLimit.Rate,
+			Interval: sec.RateLimit.Interval,
+			Clock:    systemClock{},
+		}
+	}
+	return security.Assemble(cfg)
+}
+
+// piiPolicyOf maps the validated policy string onto the gate's enum. The
+// empty value is the safe default (mask); anything else was rejected by
+// config.Validate at load.
+func piiPolicyOf(v string) security.PiiPolicy {
+	switch strings.ToLower(v) {
+	case "block":
+		return security.PiiBlock
+	case "off":
+		return security.PiiOff
+	default:
+		return security.PiiMask
+	}
+}
+
+// injectPolicyOf maps the validated policy string onto the guard's enum. The
+// empty value is the safe default (block).
+func injectPolicyOf(v string) security.InjectPolicy {
+	if strings.ToLower(v) == "flag" {
+		return security.InjectFlag
+	}
+	return security.InjectBlock
+}
+
+// buildMemoryGateConfig builds the memory gates' Config over the shared
+// SQLite store (ADR-SEC-07). The clock is the app's injected clock; the
+// embeddings opt-in builds an HTTP engine only when the operator configured
+// one — its absence leaves the vector mode OFF (FTS5-only) and never fails
+// the boot; a misconfigured destination that slipped past validation is
+// logged (without credentials) and downgraded to off.
+func (a *App) buildMemoryGateConfig() memory.Config {
+	g := a.Config.Features.Gates
+	mp := g.MemoryParams
+	cfg := memory.Config{
+		Store:          store.NewMemoryStore(a.Store),
+		Clock:          systemClock{},
+		TTL:            mp.TTL,
+		RetrievalLimit: mp.RetrievalLimit,
+		Budget:         mp.Budget,
+		MaxContent:     mp.MaxContent,
+		SinkCapacity:   mp.SinkCapacity,
+		Record:         a.memoryEventSink(),
+	}
+	if emb := mp.Embeddings; strings.TrimSpace(emb.BaseURL) != "" {
+		engine := memory.NewHTTPEmbedder(memory.EmbedderConfig{
+			BaseURL:   emb.BaseURL,
+			Model:     emb.Model,
+			APIKeyEnv: emb.APIKeyEnv,
+			Dim:       emb.Dim,
+			Policy:    egress.New(),
+		})
+		if engine == nil {
+			// Unreachable after Validate, but the fail-safe is OFF (never a
+			// boot failure): only the lexical retrieval runs.
+			a.Logger.Warn("memory embeddings opt-in is misconfigured; vector mode stays off",
+				"base_url", emb.BaseURL, "model", emb.Model)
+		} else {
+			cfg.Embedder = engine
+		}
+	}
+	return cfg
+}
+
+// memoryEventSink records memory gate events (kinds only, never content) into
+// the bounded gate record and the structured logger.
+func (a *App) memoryEventSink() func(kind string) {
+	return func(kind string) {
+		record := map[string]string{"stage": "memory", "event": kind}
+		a.gateMu.Lock()
+		if len(a.gateRecords) < gateRecordCap {
+			a.gateRecords = append(a.gateRecords, record)
+		}
+		a.gateMu.Unlock()
+		a.Logger.Debug("gate.memory", "event", kind)
+	}
+}
+
+// tokenStatSink records token-engine stats as metadata only (counts, never
+// content). It reuses the same bounded gate record buffer as the logger gate so
+// the audit surface is one place.
+func (a *App) tokenStatSink() func(token.Stats) {
+	return func(s token.Stats) {
+		record := map[string]string{
+			"stage":              "token_engine",
+			"engine":             s.ID,
+			"bytes_in":           strconv.Itoa(s.BytesIn),
+			"bytes_out":          strconv.Itoa(s.BytesOut),
+			"tokens_saved":       strconv.Itoa(s.TokensSaved),
+			"prefix_invalidated": strconv.FormatBool(s.PrefixInvalidated),
+		}
+		a.gateMu.Lock()
+		if len(a.gateRecords) < gateRecordCap {
+			a.gateRecords = append(a.gateRecords, record)
+		}
+		a.gateMu.Unlock()
+		a.Logger.Debug("gate.token_engine", "fields", record)
+	}
+}
+
+// gateSink builds the logger gate's sink: a bounded in-memory record for tests,
+// mirrored to the structured logger. It is metadata only (never a body or a
+// header value).
+func (a *App) gateSink() func(stage string, fields map[string]string) {
+	return func(stage string, fields map[string]string) {
 		record := map[string]string{"stage": stage}
 		for k, v := range fields {
 			record[k] = v
@@ -855,13 +1138,46 @@ func (a *App) wireGates() error {
 		}
 		a.gateMu.Unlock()
 		a.Logger.Debug("gate."+stage, "fields", record)
-	})
-	chain, err := appSeam.NewChain([]contracts.Gate{loggerGate})
-	if err != nil {
-		return err
 	}
-	a.Gates = chain
-	return nil
+}
+
+// logEffectiveChain records the effective chain and each gate's policy at boot
+// (ADR-0014 §4): disabling a FailClosed gate changes the security posture, so
+// the resulting chain is visible, never silent.
+func (a *App) logEffectiveChain(order gates.Order) {
+	for _, g := range order.All {
+		a.Logger.Info("gate enabled",
+			"id", g.ID(),
+			"policy", g.FailurePolicy().String(),
+			"stages", stagesString(g.Stages()))
+	}
+}
+
+// stagesString renders a stage set deterministically for the boot log.
+func stagesString(s contracts.GateStageSet) string {
+	var names []string
+	for _, st := range []contracts.GateStage{
+		contracts.StagePreRequest, contracts.StageOnResponseChunk, contracts.StagePostResponse,
+	} {
+		if s.Has(st) {
+			names = append(names, stageName(st))
+		}
+	}
+	return strings.Join(names, ",")
+}
+
+// stageName names a gate stage.
+func stageName(st contracts.GateStage) string {
+	switch st {
+	case contracts.StagePreRequest:
+		return "pre_request"
+	case contracts.StageOnResponseChunk:
+		return "on_response_chunk"
+	case contracts.StagePostResponse:
+		return "post_response"
+	default:
+		return "unknown"
+	}
 }
 
 // wireRouting builds the F3 routing layer (ADR-0009/0010/0011/0012/0013): the
@@ -1072,6 +1388,15 @@ func (a *App) Handler() http.Handler {
 	// F1 logger gate actually runs in production, not only in tests.
 	if a.Gates != nil {
 		if observer, err := appSeam.NewObserver(a.Gates); err == nil {
+			// The gateway drives the chain itself (PreRequest with the body it
+			// declared, the chunk stage and PostResponse); the observer must
+			// not run the same chain over those requests, or a stateful gate
+			// (the rate limiter) would observe every request twice.
+			observer.Skip = func(r *http.Request) bool {
+				return a.Gateway != nil &&
+					r.Method == http.MethodPost &&
+					r.URL.Path == gateway.ChatCompletionsPath
+			}
 			handler = observer.Handler(handler)
 		} else {
 			a.Logger.Warn("gate chain observer disabled: " + err.Error())

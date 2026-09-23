@@ -127,6 +127,11 @@ type Decision struct {
 	// Code/Params carry an i18n reason for Modify/Block; optional.
 	Code   string
 	Params map[string]string
+	// Derived is the request-scoped metadata the pipeline computed for this
+	// exchange (ADR-0014 §6). It is carried on the decision so the caller can
+	// reuse the SAME reference in the chunk and post-response stages without
+	// recomputing it. ADDITIVE: nil means "not computed".
+	Derived *Derived
 }
 
 // ChunkDecisionKind is the POST-COMMIT vocabulary. There is deliberately no
@@ -176,6 +181,11 @@ type GateInput struct {
 	// Meta is per-request scratch space. A gate MUST namespace its keys
 	// ("<gateID>.<key>") to avoid colliding with another gate.
 	Meta map[string]string
+	// Derived is the request-scoped metadata the PIPELINE computes ONCE per
+	// request and threads through every stage (ADR-0014 §6), so a gate never
+	// rebuilds it per chunk. ADDITIVE: nil means "not computed" and a gate falls
+	// back to deriving it from its own input. It carries header NAMES only.
+	Derived *Derived
 }
 
 // ChunkInput is the per-chunk view handed to OnResponseChunk. Committed is true
@@ -194,6 +204,10 @@ type ChunkInput struct {
 	// Committed is always true for a chunk input.
 	Committed bool
 	Meta      map[string]string
+	// Derived is the request-scoped metadata computed once in PreRequest and
+	// reused here (ADR-0014 §6). ADDITIVE: nil means "not computed". It carries
+	// header NAMES only, never values.
+	Derived *Derived
 }
 
 // Gate is the frozen extension point (plan v2, F1). A gate is stateless across

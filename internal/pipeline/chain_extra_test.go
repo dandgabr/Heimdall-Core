@@ -106,9 +106,11 @@ func TestOnResponseChunkFailPolicies(t *testing.T) {
 	})
 }
 
-// TestPostResponseFailClosedShortCircuits covers the early-return branch: a
-// fail-closed post-error stops the remaining gates.
-func TestPostResponseFailClosedShortCircuits(t *testing.T) {
+// TestPostResponseIsAlwaysFailOpen proves ADR-0014 §2: the post-response stage
+// has NO policy choice — every gate runs and the first error is only reported
+// (never short-circuits). Even a gate declaring FailClosed is treated as
+// FailOpen here, because the exchange already happened.
+func TestPostResponseIsAlwaysFailOpen(t *testing.T) {
 	boom := errors.New("post boom")
 	var secondRan bool
 	chain, _ := New([]contracts.Gate{
@@ -122,10 +124,10 @@ func TestPostResponseFailClosedShortCircuits(t *testing.T) {
 		},
 	})
 	if err := chain.PostResponse(context.Background(), contracts.GateInput{}); !errors.Is(err, boom) {
-		t.Fatalf("err = %v, want the gate error", err)
+		t.Fatalf("err = %v, want the first gate error reported", err)
 	}
-	if secondRan {
-		t.Error("a gate ran after a fail-closed post-response error")
+	if !secondRan {
+		t.Error("a later post-response gate did not run; the stage is always FailOpen")
 	}
 }
 

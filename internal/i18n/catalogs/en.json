@@ -87,5 +87,9 @@
   "provider.reroute_unsupported": "Reroute is not available in this build: {reason}.",
   "provider.api_key_read_failed": "Could not read the API key: {reason}.",
   "route.fusion_self_judge": "Combo {name} uses fusion with a judge that resolves to itself (infinite recursion).",
-  "route.fusion_all_failed": "All {panels} fusion panels failed; no response to judge."
+  "route.fusion_all_failed": "All {panels} fusion panels failed; no response to judge.",
+  "security.rate_limited": "Too many requests for this client key; retry after {retry_after} seconds.",
+  "security.destination_denied": "The request references a denied network destination ({host}).",
+  "security.injection_detected": "The request was refused by the prompt-injection policy.",
+  "security.pii_blocked": "The request was refused because it contains personal data ({types})."
 }

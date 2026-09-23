@@ -197,9 +197,37 @@ func envLayer(env map[string]string) map[string]string {
 		}
 		if key, ok := parseProviderEnvVar(upper); ok {
 			out[key] = value
+			continue
+		}
+		// A per-gate switch: HEIMDALL_FEATURES_GATES_<NAME> (ADR-0014 §4). The
+		// three group variables are in envKeyMap above, so anything else under
+		// that prefix is a gate name. The name is lowercased so the key matches
+		// the TOML form (features.gates.<name>).
+		if name, ok := parseGateEnvVar(upper); ok {
+			out["features.gates."+name] = value
 		}
 	}
 	return out
+}
+
+// parseGateEnvVar recognises HEIMDALL_FEATURES_GATES_<NAME> for a NAME that is
+// not one of the three group switches. The name is lowercased.
+func parseGateEnvVar(name string) (string, bool) {
+	const prefix = "HEIMDALL_FEATURES_GATES_"
+	if !strings.HasPrefix(name, prefix) {
+		return "", false
+	}
+	rest := strings.ToLower(name[len(prefix):])
+	switch rest {
+	case "", "token", "memory", "security":
+		return "", false
+	}
+	if strings.Contains(rest, "_") {
+		// Underscores would be ambiguous with the group variables; a gate name
+		// uses dots/hyphens, which env cannot express. Refuse rather than guess.
+		return "", false
+	}
+	return rest, true
 }
 
 // providerEnvFields is the closed set of provider fields addressable via env.
@@ -308,13 +336,181 @@ func set(cfg *Config, key, value string) error {
 	case "passthrough.api_key_env":
 		cfg.Passthrough.APIKeyEnv = value
 	default:
+		// The memory gates' parameter block (F4 wave 5, ADR-SEC-07).
+		if ok, err := setMemoryGateParam(cfg, key, value); ok {
+			return err
+		}
+		// The security gates' parameter block (F4 wave 5, ADR-SEC-03/05).
+		if ok, err := setSecurityGateParam(cfg, key, value); ok {
+			return err
+		}
 		// A `[[providers]]` entry flattens to providers.<i>.<field>.
 		if idx, field, ok := parseProviderKey(key); ok {
 			return setProvider(cfg, idx, field, value)
 		}
+		// A token engine switch is
+		// features.gates.token.engines.<name>.<field> (ADR-0015 §3/§6).
+		if name, field, ok := parseTokenEngineKey(key); ok {
+			return setTokenEngine(cfg, name, field, value)
+		}
+		// A per-gate switch is features.gates.<name> (ADR-0014 §4). The three
+		// group switches are handled above, so anything else under
+		// features.gates. is a gate name.
+		if name, ok := parseGateSwitch(key); ok {
+			b, err := parseBool(value)
+			if err != nil {
+				return badValue(key, value)
+			}
+			if cfg.Features.Gates.Enabled == nil {
+				cfg.Features.Gates.Enabled = map[string]bool{}
+			}
+			cfg.Features.Gates.Enabled[name] = b
+			return nil
+		}
 		// forward-compatible: ignore unknown keys
 	}
 	return nil
+}
+
+// setMemoryGateParam applies one features.gates.memory.* parameter key. It
+// reports whether the key belonged to the block, so unknown keys keep falling
+// through to the forward-compatible ignore.
+func setMemoryGateParam(cfg *Config, key, value string) (bool, error) {
+	const prefix = "features.gates.memory."
+	if !strings.HasPrefix(key, prefix) {
+		return false, nil
+	}
+	m := &cfg.Features.Gates.MemoryParams
+	switch key {
+	case prefix + "ttl":
+		return true, setDurationParam(key, value, func(d time.Duration) { m.TTL = d })
+	case prefix + "budget":
+		return true, setDurationParam(key, value, func(d time.Duration) { m.Budget = d })
+	case prefix + "retrieval_limit":
+		return true, setIntParam(key, value, func(n int) { m.RetrievalLimit = n })
+	case prefix + "max_content":
+		return true, setIntParam(key, value, func(n int) { m.MaxContent = n })
+	case prefix + "sink_capacity":
+		return true, setIntParam(key, value, func(n int) { m.SinkCapacity = n })
+	case prefix + "embeddings.base_url":
+		m.Embeddings.BaseURL = value
+		return true, nil
+	case prefix + "embeddings.model":
+		m.Embeddings.Model = value
+		return true, nil
+	case prefix + "embeddings.api_key_env":
+		m.Embeddings.APIKeyEnv = value
+		return true, nil
+	case prefix + "embeddings.dim":
+		return true, setIntParam(key, value, func(n int) { m.Embeddings.Dim = n })
+	}
+	return false, nil
+}
+
+// setSecurityGateParam applies one features.gates.security.* parameter key.
+func setSecurityGateParam(cfg *Config, key, value string) (bool, error) {
+	const prefix = "features.gates.security."
+	if !strings.HasPrefix(key, prefix) {
+		return false, nil
+	}
+	sec := &cfg.Features.Gates.SecurityParams
+	switch key {
+	case prefix + "pii_policy":
+		sec.PIIPolicy = strings.ToLower(strings.TrimSpace(value))
+		return true, nil
+	case prefix + "injection_policy":
+		sec.InjectPolicy = strings.ToLower(strings.TrimSpace(value))
+		return true, nil
+	case prefix + "rate_limit.rate":
+		return true, setIntParam(key, value, func(n int) { sec.RateLimit.Rate = n })
+	case prefix + "rate_limit.interval":
+		return true, setDurationParam(key, value, func(d time.Duration) { sec.RateLimit.Interval = d })
+	}
+	return false, nil
+}
+
+// setIntParam parses and stores one integer parameter with a typed error.
+func setIntParam(key, value string, set func(int)) error {
+	n, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil {
+		return badValue(key, value)
+	}
+	set(n)
+	return nil
+}
+
+// setDurationParam parses and stores one duration parameter with a typed error.
+func setDurationParam(key, value string, set func(time.Duration)) error {
+	d, err := parseDuration(value)
+	if err != nil {
+		return badValue(key, value)
+	}
+	set(d)
+	return nil
+}
+
+// tokenEngineFields is the closed set of per-engine fields of the token gate.
+var tokenEngineFields = map[string]bool{"enabled": true, "allow_prefix_rewrite": true}
+
+// parseTokenEngineKey recognises
+// features.gates.token.engines.<name>.<field> and returns the engine name and
+// field. The name may contain dots; the field is the last segment and must be
+// one of the known fields (ADR-0015 §3/§6), so a typo is ignored rather than
+// silently setting nothing.
+func parseTokenEngineKey(key string) (name, field string, ok bool) {
+	const prefix = "features.gates.token.engines."
+	if !strings.HasPrefix(key, prefix) {
+		return "", "", false
+	}
+	rest := key[len(prefix):]
+	dot := strings.LastIndexByte(rest, '.')
+	if dot <= 0 || dot == len(rest)-1 {
+		return "", "", false
+	}
+	engine, f := rest[:dot], rest[dot+1:]
+	if !tokenEngineFields[f] {
+		return "", "", false
+	}
+	return engine, f, true
+}
+
+// setTokenEngine writes one field of one token engine's config, growing the map.
+func setTokenEngine(cfg *Config, name, field, value string) error {
+	b, err := parseBool(value)
+	if err != nil {
+		return badValue("features.gates.token.engines."+name+"."+field, value)
+	}
+	if cfg.Features.Gates.TokenEngines == nil {
+		cfg.Features.Gates.TokenEngines = map[string]TokenEngineConfig{}
+	}
+	ec := cfg.Features.Gates.TokenEngines[name]
+	switch field {
+	case "enabled":
+		ec.Disabled = !b
+	case "allow_prefix_rewrite":
+		ec.AllowPrefixRewrite = b
+	}
+	cfg.Features.Gates.TokenEngines[name] = ec
+	return nil
+}
+
+// parseGateSwitch recognises features.gates.<name> for a gate name that is NOT
+// one of the three group switches (token/memory/security). The name is the last
+// segment after "features.gates." and must be non-empty.
+func parseGateSwitch(key string) (string, bool) {
+	const prefix = "features.gates."
+	if !strings.HasPrefix(key, prefix) {
+		return "", false
+	}
+	name := key[len(prefix):]
+	switch name {
+	case "token", "memory", "security", "":
+		return "", false
+	}
+	if strings.Contains(name, ".") {
+		return "", false
+	}
+	return name, true
 }
 
 // parseProviderKey splits "providers.<i>.<field>" into its parts. It returns

@@ -1,8 +1,11 @@
-// Package gates holds the built-in gate implementations.
+// Package gates holds the gate ENGINE (ADR-0014: registry, dependency graph,
+// per-stage topological order, failure-policy validation) and the built-in gate
+// implementations.
 //
-// F1 ships only the trivial logger gate (the plan's "gate trivial de logger");
-// the token, memory and security engines are F4. A gate receives the MINIMUM
-// content it needs (ADR-003 / SEC-13): the logger gate asks for no body at all.
+// F4-wave-1 ships the engine plus the trivial logger gate; the token, memory and
+// security gates land in later waves and register through the same registry. A
+// gate receives the MINIMUM content it needs (ADR-SEC-03 / SEC-13): the logger
+// gate asks for no body at all.
 package gates
 
 import (
@@ -56,26 +59,43 @@ func (g *Logger) RequiredCaps() contracts.GateCaps { return 0 }
 // FailurePolicy implements contracts.Gate.
 func (g *Logger) FailurePolicy() contracts.FailurePolicy { return contracts.FailOpen }
 
+// Declare implements contracts.GateDeclarer. The logger is pure observation: it
+// reads no field and writes none, so it has no data edge and is ordered by ID
+// (its position among the unordered gates is the deterministic tie-break).
+func (g *Logger) Declare() contracts.Declared {
+	return contracts.Declared{
+		Stages: g.Stages(),
+	}
+}
+
 // PreRequest implements contracts.Gate. It logs metadata only and always
 // continues.
 func (g *Logger) PreRequest(ctx context.Context, in contracts.GateInput) (contracts.Decision, error) {
-	g.emit("pre_request", metadata(in.RequestID.String(), in.Provider, in.Credential, in.Model, in.Headers))
+	g.emit("pre_request", metadataOf(in.Derived, in.RequestID, in.Provider, in.Credential, in.Model, in.Headers))
 	return contracts.Decision{Kind: contracts.DecisionContinue}, nil
 }
 
 // OnResponseChunk implements contracts.Gate. It logs the chunk INDEX and size,
-// never the bytes.
+// never the bytes. The shared metadata is REUSED from the pre-request stage
+// (ADR-0014 §6): when the pipeline supplied Derived, its request-scoped Fields
+// map is written into directly (no per-gate map, no header join), so the chunk
+// cost does not grow with the number of gates.
 func (g *Logger) OnResponseChunk(ctx context.Context, in contracts.ChunkInput) (contracts.ChunkDecision, error) {
-	fields := metadata(in.RequestID.String(), in.Provider, in.Credential, in.Model, in.Headers)
-	fields["chunk_index"] = itoa(in.Index)
-	fields["chunk_bytes"] = itoa(len(in.Body))
+	fields := metadataOf(in.Derived, in.RequestID, in.Provider, in.Credential, in.Model, in.Headers)
+	// When the pipeline supplied Derived, the per-chunk scalars were already
+	// stamped into the shared map once (ADR-0014 §6), so the gate adds nothing.
+	// Without Derived the gate derives them itself, preserving standalone use.
+	if in.Derived == nil || in.Derived.Fields == nil {
+		fields["chunk_index"] = itoa(in.Index)
+		fields["chunk_bytes"] = itoa(len(in.Body))
+	}
 	g.emit("response_chunk", fields)
 	return contracts.ChunkDecision{Kind: contracts.ChunkPassThrough}, nil
 }
 
 // PostResponse implements contracts.Gate.
 func (g *Logger) PostResponse(ctx context.Context, in contracts.GateInput) error {
-	g.emit("post_response", metadata(in.RequestID.String(), in.Provider, in.Credential, in.Model, in.Headers))
+	g.emit("post_response", metadataOf(in.Derived, in.RequestID, in.Provider, in.Credential, in.Model, in.Headers))
 	return nil
 }
 
@@ -88,15 +108,35 @@ func (g *Logger) emit(stage string, fields map[string]string) {
 	}
 }
 
-// metadata builds the non-secret field map shared by the stages. Header VALUES
-// are never included; only sorted header names, which is enough to diagnose a
-// routing problem without touching credentials.
-func metadata(requestID string, provider domain.ProviderID, credential domain.CredentialID, model domain.ModelID, headers http.Header) map[string]string {
+// metadataOf returns the non-secret field map shared by the stages. When the
+// pipeline supplied the request-scoped Derived (ADR-0014 §6), its preallocated
+// Fields map is returned DIRECTLY: the identity fields and the joined header
+// names were computed once per request, so neither this gate nor a per-chunk
+// call rebuilds them. The caller (emit) must consume the map synchronously and
+// not retain it. Otherwise the gate falls back to deriving a fresh map from its
+// own input, preserving standalone behaviour.
+//
+// Header VALUES are never included; only sorted header names, which is enough to
+// diagnose a routing problem without touching credentials.
+func metadataOf(d *contracts.Derived, requestID domain.RequestID, provider domain.ProviderID, credential domain.CredentialID, model domain.ModelID, headers http.Header) map[string]string {
+	if d != nil && d.Fields != nil {
+		return d.Fields
+	}
 	fields := map[string]string{
-		"request_id": requestID,
+		"request_id": string(requestID),
 		"provider":   string(provider),
 		"credential": string(credential),
 		"model":      string(model),
+	}
+	if d != nil {
+		fields["request_id"] = d.RequestID.String()
+		fields["provider"] = string(d.Provider)
+		fields["credential"] = string(d.Credential)
+		fields["model"] = string(d.Model)
+		if d.HeaderNames != "" {
+			fields["header_names"] = d.HeaderNames
+		}
+		return fields
 	}
 	if len(headers) > 0 {
 		names := make([]string, 0, len(headers))

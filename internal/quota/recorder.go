@@ -243,8 +243,8 @@ func (r *Recorder) ApplyHeader(ctx context.Context, cred domain.CredentialID, wi
 		w.Source = contracts.SourceHeader
 		w.UpdatedAt = now
 	}
-	m.Unlock()
 	r.persistWindows(ctx, st)
+	m.Unlock()
 }
 
 // ApplyRetryHint re-anchors a window's ResetsAt from a 429 Retry-After/reset
@@ -270,8 +270,8 @@ func (r *Recorder) ApplyRetryHint(ctx context.Context, cred domain.CredentialID,
 		w.Source = contracts.SourceRetryHint
 		w.UpdatedAt = r.cfg.Clock.Now()
 	}
-	m.Unlock()
 	r.persistWindows(ctx, st)
+	m.Unlock()
 }
 
 // Snapshot returns the current state of a credential, loading it lazily. ok is
@@ -280,10 +280,14 @@ func (r *Recorder) Snapshot(ctx context.Context, cred domain.CredentialID) (cont
 	if cred == "" {
 		return contracts.QuotaState{}, false
 	}
+	// The lock is held through the read AND the clone: a concurrent Record of
+	// the same credential appends to st.Windows under this lock, so releasing it
+	// before cloning would let a reader observe a slice mid-append (a data race,
+	// exercised by the fusion fan-out which reads the filter while recording).
 	m := r.lockCred(cred)
 	m.Lock()
+	defer m.Unlock()
 	st := r.stateLocked(ctx, cred)
-	m.Unlock()
 	if len(st.Windows) == 0 && st.TerminalCode == "" {
 		return contracts.QuotaState{}, false
 	}

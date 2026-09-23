@@ -136,6 +136,36 @@ func BenchmarkChainOnResponseChunk(b *testing.B) {
 	}
 }
 
+// BenchmarkChainOnResponseChunkDerived measures the F4 optimization (ADR-0014
+// §6): the request-scoped Derived is computed ONCE (as PreRequest does) and
+// threaded into every chunk, so the per-chunk cost no longer grows with the
+// number of gates via metadata. Compare with BenchmarkChainOnResponseChunk,
+// which leaves Derived nil and forces each gate to rebuild it.
+func BenchmarkChainOnResponseChunkDerived(b *testing.B) {
+	ctx := context.Background()
+	for _, n := range gateCounts {
+		b.Run("logger/gates="+strconv.Itoa(n), func(b *testing.B) {
+			chain := benchChainLogger(b, n)
+			// Compute Derived once, exactly as PreRequest would.
+			pre := benchGateInput()
+			dec, err := chain.PreRequest(ctx, pre)
+			if err != nil {
+				b.Fatalf("PreRequest: %v", err)
+			}
+			in := benchChunkInput()
+			in.Derived = dec.Derived
+			b.SetBytes(int64(len(in.Body)))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if _, err := chain.OnResponseChunk(ctx, in); err != nil {
+					b.Fatalf("OnResponseChunk: %v", err)
+				}
+			}
+		})
+	}
+}
+
 func BenchmarkChainPostResponse(b *testing.B) {
 	ctx := context.Background()
 	for _, kind := range []struct {

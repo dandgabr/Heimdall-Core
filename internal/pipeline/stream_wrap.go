@@ -89,6 +89,9 @@ func (s *closingStream) Recv() (contracts.Chunk, error) {
 			Index:      s.index,
 			Committed:  true,
 			Meta:       s.base.Meta,
+			// The request-scoped Derived computed in PreRequest is reused here
+			// (ADR-0014 §6): the chunk path does not rebuild metadata.
+			Derived: s.base.Derived,
 		}
 		s.index++
 

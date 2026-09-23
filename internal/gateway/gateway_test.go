@@ -81,19 +81,50 @@ type fakeChain struct {
 	postErr  error
 	preCalls int
 	postCall int
+	// chunkSawDerived records the Derived the chain saw in the chunk stage.
+	chunkSawDerived *contracts.Derived
+	// needsBody scripts ConsumesRequestBody; preBody records what PreRequest saw.
+	needsBody bool
+	preBody   []byte
+	// preMeta records the Meta the chain saw, so boundary-propagation tests
+	// (the client key, G-1) can assert what the gates would read.
+	preMeta map[string]string
 }
 
-func (c *fakeChain) PreRequest(context.Context, contracts.GateInput) (contracts.Decision, error) {
+func (c *fakeChain) PreRequest(_ context.Context, in contracts.GateInput) (contracts.Decision, error) {
 	c.preCalls++
+	c.preBody = in.Body
+	c.preMeta = in.Meta
 	return c.pre, c.preErr
 }
-func (c *fakeChain) OnResponseChunk(context.Context, contracts.ChunkInput) (contracts.ChunkDecision, error) {
+func (c *fakeChain) OnResponseChunk(_ context.Context, in contracts.ChunkInput) (contracts.ChunkDecision, error) {
+	c.chunkSawDerived = in.Derived
 	return c.chunkDec, c.chunkErr
+}
+
+// TestChatReusesDerivedFromDecision proves the gateway threads the chain's
+// request-scoped Derived into the chunk stage (ADR-0014 §6).
+func TestChatReusesDerivedFromDecision(t *testing.T) {
+	dv := &contracts.Derived{RequestID: "r"}
+	res := &fakeResolver{plan: samplePlan()}
+	disp := &fakeDispatcher{stream: &memStream{chunks: []contracts.Chunk{{Data: []byte("x")}}}}
+	chain := &fakeChain{pre: contracts.Decision{Kind: contracts.DecisionContinue, Derived: dv}}
+	h := newHandler(res, disp, nil, chain)
+	serve(h, `{"model":"m","stream":true,"messages":[]}`)
+	if chain.chunkSawDerived != dv {
+		t.Fatalf("chunk stage did not receive the decision's Derived: %+v", chain.chunkSawDerived)
+	}
 }
 func (c *fakeChain) PostResponse(context.Context, contracts.GateInput) error {
 	c.postCall++
 	return c.postErr
 }
+
+// ConsumesRequestBody reports the scripted body need.
+func (c *fakeChain) ConsumesRequestBody() bool { return c.needsBody }
+
+// sawBody records the body the chain received, to assert body delivery.
+func (c *fakeChain) PreRequestBody() []byte { return c.preBody }
 
 // memStream is an in-memory contracts.Stream.
 type memStream struct {
@@ -241,6 +272,22 @@ func TestChatGateModifyRewritesBody(t *testing.T) {
 	}
 }
 
+// TestChatGateModifyHeaders proves a header-only Modify reaches the dispatcher's
+// WireRequest.
+func TestChatGateModifyHeaders(t *testing.T) {
+	res := &fakeResolver{plan: samplePlan()}
+	disp := &fakeDispatcher{resp: &contracts.Response{Wire: contracts.WireResponse{Status: 200, Body: []byte(`{}`)}}}
+	chain := &fakeChain{pre: contracts.Decision{
+		Kind:    contracts.DecisionModify,
+		Headers: map[string][]string{"X-New": {"v"}},
+	}}
+	h := newHandler(res, disp, nil, chain)
+	serve(h, `{"model":"m","messages":[]}`)
+	if got := disp.gotWire.Headers.Get("X-New"); got != "v" {
+		t.Fatalf("modified header not applied: %q", got)
+	}
+}
+
 func TestChatGatePreRequestError(t *testing.T) {
 	chain := &fakeChain{preErr: errors.New("pre boom")}
 	h := newHandler(&fakeResolver{}, &fakeDispatcher{}, nil, chain)
@@ -374,6 +421,7 @@ func (c *replaceThenDropChain) OnResponseChunk(context.Context, contracts.ChunkI
 	return c.fn(), nil
 }
 func (c *replaceThenDropChain) PostResponse(context.Context, contracts.GateInput) error { return nil }
+func (c *replaceThenDropChain) ConsumesRequestBody() bool                               { return false }
 
 // TestStreamChunkGateErrorIsSSE proves a FailClosed chunk-gate error becomes a
 // terminal SSE event.
@@ -621,6 +669,46 @@ func TestResolveTargetNonCombo(t *testing.T) {
 	if combo != "" || model != "plain-model" {
 		t.Fatalf("resolveTarget = %q / %q, want empty / plain-model", combo, model)
 	}
+}
+
+// TestChatDeliversBodyOnlyWhenDeclared is the SEC-03 §2 regression at the HTTP
+// boundary: the body reaches PreRequest ONLY when the chain declares it needs it.
+func TestChatDeliversBodyOnlyWhenDeclared(t *testing.T) {
+	body := `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
+
+	t.Run("declared need", func(t *testing.T) {
+		res := &fakeResolver{plan: samplePlan()}
+		disp := &fakeDispatcher{resp: &contracts.Response{Wire: contracts.WireResponse{Status: 200, Body: []byte(`{}`)}}}
+		chain := &fakeChain{pre: contracts.Decision{Kind: contracts.DecisionContinue}, needsBody: true}
+		h := newHandler(res, disp, nil, chain)
+		rec := serve(h, body)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d", rec.Code)
+		}
+		if string(chain.PreRequestBody()) != body {
+			t.Fatalf("body not delivered: %q", chain.PreRequestBody())
+		}
+	})
+
+	t.Run("not declared", func(t *testing.T) {
+		res := &fakeResolver{plan: samplePlan()}
+		disp := &fakeDispatcher{resp: &contracts.Response{Wire: contracts.WireResponse{Status: 200, Body: []byte(`{}`)}}}
+		chain := &fakeChain{pre: contracts.Decision{Kind: contracts.DecisionContinue}, needsBody: false}
+		h := newHandler(res, disp, nil, chain)
+		serve(h, body)
+		if chain.PreRequestBody() != nil {
+			t.Fatalf("body delivered without a declaration: %q", chain.PreRequestBody())
+		}
+	})
+
+	t.Run("nil chain", func(t *testing.T) {
+		res := &fakeResolver{plan: samplePlan()}
+		disp := &fakeDispatcher{resp: &contracts.Response{Wire: contracts.WireResponse{Status: 200, Body: []byte(`{}`)}}}
+		h := newHandler(res, disp, nil, nil)
+		if rec := serve(h, body); rec.Code != http.StatusOK {
+			t.Fatalf("nil chain status = %d", rec.Code)
+		}
+	})
 }
 
 // TestNewDefaultsIDs covers the nil IDGen default.

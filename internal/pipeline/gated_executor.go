@@ -69,6 +69,10 @@ func (g *GatedExecutor) Do(ctx context.Context, req contracts.WireRequest, cred 
 	if err != nil {
 		return contracts.WireResponse{}, err
 	}
+	// Reuse the request-scoped Derived computed once (ADR-0014 §6).
+	if decision.Derived != nil {
+		in.Derived = decision.Derived
+	}
 	if decision.Kind == contracts.DecisionReroute {
 		return contracts.WireResponse{}, rerouteUnsupported()
 	}
@@ -95,6 +99,11 @@ func (g *GatedExecutor) DoStream(ctx context.Context, req contracts.WireRequest,
 	decision, err := g.chain.PreRequest(ctx, in)
 	if err != nil {
 		return nil, err
+	}
+	// Reuse the request-scoped Derived computed once (ADR-0014 §6) in the
+	// per-chunk stage via the closing stream's base input.
+	if decision.Derived != nil {
+		in.Derived = decision.Derived
 	}
 	if decision.Kind == contracts.DecisionReroute {
 		return nil, rerouteUnsupported()

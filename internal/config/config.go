@@ -179,6 +179,128 @@ type GatesFeatures struct {
 	Token    bool
 	Memory   bool
 	Security bool
+	// Enabled is the PER-GATE switch (ADR-0014 §4): a gate named here is
+	// enabled/disabled individually, independent of the Token/Memory/Security
+	// group switches. A gate absent from the map falls back to its group switch.
+	// The switch layer declares only on/off — never order: the order is derived
+	// from the gate graph (ADR-0014 §1); per-gate PARAMETERS live in the typed
+	// blocks below (Memory/Security) and are consumed only by the gates.
+	Enabled map[string]bool
+	// TokenEngines is the token gate's per-ENGINE config (ADR-0015 §3/§6):
+	// `features.gates.token.engines.<name>.enabled` and
+	// `...allow_prefix_rewrite`. It is DATA for the token gate only; the core
+	// never reads it.
+	TokenEngines map[string]TokenEngineConfig
+	// MemoryParams is the memory gates' parameter block (F4 wave 5, ADR-SEC-07):
+	// `features.gates.memory.*`. It is DATA for the memory gates only; the
+	// group switch is Memory (bool) above.
+	MemoryParams MemoryGatesConfig
+	// SecurityParams is the security gates' parameter block (F4 wave 5,
+	// ADR-SEC-03/05): `features.gates.security.*`. The group switch is
+	// Security (bool) above.
+	SecurityParams SecurityGatesConfig
+}
+
+// MemoryGatesConfig carries the memory gates' documented parameters. Every
+// zero value falls back to the gate's own safe default, so a partially
+// populated block is valid.
+type MemoryGatesConfig struct {
+	// TTL is the retention of a stored memory (ADR-SEC-07 §4: episodic default
+	// of 30 days). Zero → the gate's DefaultTTL. No memory is perennial.
+	TTL time.Duration
+	// RetrievalLimit caps how many memories one retrieval injects. Zero →
+	// the gate default (3).
+	RetrievalLimit int
+	// Budget bounds ONE synchronous retrieval call (ADR-SEC-07 §1: 100ms).
+	// Zero → the gate default. A store slower than the budget fail-opens.
+	Budget time.Duration
+	// MaxContent bounds one extracted/stored text in bytes. Zero → the gate
+	// default (4096).
+	MaxContent int
+	// SinkCapacity bounds the async writer queue: pending memory writes before
+	// backpressure starts DROPPING them. Zero → the gate default (64).
+	SinkCapacity int
+	// Embeddings is the vector-mode opt-in (ADR-SEC-07 §5). The zero value is
+	// OFF (local-first: FTS5-only retrieval). A non-empty BaseURL turns the
+	// opt-in ON and requires Model, Dim and an HTTPS URL (validated at boot;
+	// the egress policy validates the destination again at client build).
+	Embeddings EmbeddingsConfig
+}
+
+// EmbeddingsConfig is the opt-in external embedding engine.
+type EmbeddingsConfig struct {
+	// BaseURL is the embeddings API root. Empty = vector mode OFF.
+	BaseURL string
+	// Model is the provider's embedding model identifier.
+	Model string
+	// APIKeyEnv NAMES the environment variable holding the API key; the key
+	// itself never appears in the config file.
+	APIKeyEnv string
+	// Dim is the expected vector dimensionality (a mismatch is an error, never
+	// a silent truncation).
+	Dim int
+}
+
+// SecurityGatesConfig carries the security gates' policies.
+type SecurityGatesConfig struct {
+	// PIIPolicy is the PII masker's behaviour on detection: "mask" (rewrites
+	// the match into a typed placeholder — the default), "block" (refuses the
+	// request listing only the detected types) or "off" (the gate is not
+	// constructed). Empty → mask.
+	PIIPolicy string
+	// InjectPolicy is the injection guard's behaviour on a signature match:
+	// "block" (refuses with a 400 synthetic — the default, FailClosed) or
+	// "flag" (records the matched rule name and continues — FailOpen). Empty →
+	// block.
+	InjectPolicy string
+	// RateLimit is the per-client-key throttle. The zero Rate keeps it OFF:
+	// the burst size is an operator capacity decision with no safe default.
+	RateLimit RateLimitConfig
+}
+
+// RateLimitConfig configures the token-bucket throttle: Rate requests per
+// Interval, burst = Rate, refill = Rate/Interval per second. Rate 0 = off.
+type RateLimitConfig struct {
+	Rate int
+	// Interval is the refill period. Zero (with Rate set) fails validation.
+	Interval time.Duration
+}
+
+// TokenEngineConfig is the per-engine switch of the token gate (ADR-0015 §3/§6).
+type TokenEngineConfig struct {
+	// Disabled turns an individual engine off even when the token gate is on.
+	Disabled bool
+	// AllowPrefixRewrite is the operator's explicit opt-in for an ImpactHigh
+	// engine (ADR-0015 §3). It is refused at registration when the engine is not
+	// ImpactHigh.
+	AllowPrefixRewrite bool
+}
+
+// TokenEngineEnabled reports whether a token engine runs. An unknown engine
+// defaults to enabled (the gate's own default set); an explicit Disabled wins.
+func (g GatesFeatures) TokenEngineEnabled(name string) bool {
+	if ec, ok := g.TokenEngines[name]; ok {
+		return !ec.Disabled
+	}
+	return true
+}
+
+// TokenEngineAllowPrefixRewrite reports the operator's opt-in for an engine.
+func (g GatesFeatures) TokenEngineAllowPrefixRewrite(name string) bool {
+	return g.TokenEngines[name].AllowPrefixRewrite
+}
+
+// GateEnabled reports whether an individual gate is enabled, given its group
+// switch as the fallback. An explicit per-gate entry wins; otherwise the group
+// switch decides. This is the single rule the composition root uses, so the core
+// needs no change to add a gate.
+func (g GatesFeatures) GateEnabled(name string, groupEnabled bool) bool {
+	if g.Enabled != nil {
+		if v, ok := g.Enabled[name]; ok {
+			return v
+		}
+	}
+	return groupEnabled
 }
 
 // Passthrough is the F0.7 end-to-end provider. It is a single hardcoded
@@ -234,9 +356,27 @@ func Defaults() Config {
 	}
 }
 
-// GatesFeaturesConfig builds the gates feature block with one switch.
+// GatesFeaturesConfig builds the gates feature block with one switch and the
+// documented parameter defaults (the gates re-default zero values themselves,
+// but the shipped defaults are explicit so operators can see and override
+// them).
 func GatesFeaturesConfig(on bool) Features {
-	return Features{Gates: GatesFeatures{Token: on, Memory: on, Security: on}}
+	return Features{Gates: GatesFeatures{
+		Token: on, Memory: on, Security: on,
+		MemoryParams: MemoryGatesConfig{
+			TTL:            30 * 24 * time.Hour, // ADR-SEC-07 §4
+			RetrievalLimit: 3,
+			Budget:         100 * time.Millisecond, // ADR-SEC-07 §1
+			MaxContent:     4096,
+			SinkCapacity:   64,
+			Embeddings:     EmbeddingsConfig{}, // vector OFF: local-first
+		},
+		SecurityParams: SecurityGatesConfig{
+			PIIPolicy:    "mask",
+			InjectPolicy: "block",
+			RateLimit:    RateLimitConfig{}, // off: opt-in capacity decision
+		},
+	}}
 }
 
 // Validate enforces the ADR-003 bind invariant and shape of every field. It
@@ -281,6 +421,54 @@ func (c Config) Validate() error {
 	}
 	if err := validateProviders(c.Providers); err != nil {
 		return err
+	}
+	return validateGates(c.Features.Gates)
+}
+
+// validateGates enforces the shape of the gate parameter blocks (fail-closed:
+// an unknown policy name is a config error, never a silent fallback — a typo'd
+// "blok" must not boot as if the operator had chosen the default).
+func validateGates(g GatesFeatures) error {
+	switch strings.ToLower(g.SecurityParams.PIIPolicy) {
+	case "", "mask", "block", "off":
+	default:
+		return configProviderError("invalid features.gates.security.pii_policy",
+			map[string]string{"value": g.SecurityParams.PIIPolicy})
+	}
+	switch strings.ToLower(g.SecurityParams.InjectPolicy) {
+	case "", "block", "flag":
+	default:
+		return configProviderError("invalid features.gates.security.injection_policy",
+			map[string]string{"value": g.SecurityParams.InjectPolicy})
+	}
+	if g.SecurityParams.RateLimit.Rate < 0 {
+		return configProviderError("negative features.gates.security.rate_limit.rate",
+			map[string]string{"value": strconv.Itoa(g.SecurityParams.RateLimit.Rate)})
+	}
+	if g.SecurityParams.RateLimit.Rate > 0 && g.SecurityParams.RateLimit.Interval <= 0 {
+		return configProviderError("rate_limit.rate set without a positive interval",
+			map[string]string{"rate": strconv.Itoa(g.SecurityParams.RateLimit.Rate)})
+	}
+	if g.MemoryParams.TTL < 0 || g.MemoryParams.Budget < 0 {
+		return configProviderError("negative memory ttl/budget", nil)
+	}
+	if g.MemoryParams.RetrievalLimit < 0 || g.MemoryParams.MaxContent < 0 || g.MemoryParams.SinkCapacity < 0 {
+		return configProviderError("negative memory limit", nil)
+	}
+	emb := g.MemoryParams.Embeddings
+	if strings.TrimSpace(emb.BaseURL) == "" {
+		return nil // vector mode OFF: nothing else to validate
+	}
+	if strings.TrimSpace(emb.Model) == "" || emb.Dim <= 0 {
+		return configProviderError("embeddings opt-in requires model and a positive dim",
+			map[string]string{"model": emb.Model, "dim": strconv.Itoa(emb.Dim)})
+	}
+	// The same scheme/host policy the egress layer applies at client build
+	// time (ADR-SEC-05): an http:// or private destination is refused at boot
+	// rather than silently downgraded to "vector off".
+	if _, err := egress.ValidateUpstreamURL(emb.BaseURL); err != nil {
+		return configProviderError("embeddings base_url fails the egress policy",
+			map[string]string{"url": emb.BaseURL})
 	}
 	return nil
 }
@@ -344,6 +532,9 @@ func validateProviders(list []ProviderConfig) error {
 }
 
 func configProviderError(reason string, params map[string]string) error {
+	if params == nil {
+		params = map[string]string{}
+	}
 	params["reason"] = reason
 	return domain.New(domain.CodeConfigLoadFailed,
 		domain.WithHTTPStatus(500),
