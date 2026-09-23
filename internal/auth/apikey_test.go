@@ -132,13 +132,18 @@ func TestDescriptorsCoverFourProviders(t *testing.T) {
 	}
 
 	// Antigravity is the confirmed OAuth provider: it must declare the full
-	// CloudCode descriptor, client secret and obfuscation.
+	// CloudCode descriptor, the PUBLIC client id, RequiresClientSecret and
+	// obfuscation. The client SECRET is deliberately NOT in the descriptor: it
+	// is injected from config (secret-scanning hazard).
 	ag := descs[ProviderAntigravity]
 	if ag.Protocol != contracts.WireCloudCode {
 		t.Errorf("antigravity protocol = %q, want %q", ag.Protocol, contracts.WireCloudCode)
 	}
-	if !ag.RequiresClientSecret || ag.ClientSecret == "" || ag.ClientID == "" {
-		t.Errorf("antigravity client not configured: %+v", ag)
+	if !ag.RequiresClientSecret || ag.ClientID == "" {
+		t.Errorf("antigravity client id/requires-secret not configured: %+v", ag)
+	}
+	if ag.ClientSecret != "" {
+		t.Errorf("antigravity must NOT hardcode a client secret, got %q", ag.ClientSecret)
 	}
 	if !ag.IsObfuscated() || ag.RiskNotice == "" {
 		t.Errorf("antigravity must declare obfuscation + a risk notice: %+v", ag)
@@ -162,9 +167,12 @@ func TestDescriptorLookup(t *testing.T) {
 
 // TestFlowFactoryBuildsAntigravityFlow is the Wave-2 replacement for the old
 // "pending" guard: Antigravity's endpoints are confirmed, so Build must return
-// the confidential-client AntigravityFlow (not refuse).
+// the confidential-client AntigravityFlow (not refuse) WHEN the operator has
+// supplied the client secret.
 func TestFlowFactoryBuildsAntigravityFlow(t *testing.T) {
-	f := NewFlowFactory(testDeps())
+	f := NewFlowFactoryWithSecrets(testDeps(), map[domain.ProviderID]string{
+		ProviderAntigravity: "test-only-secret",
+	})
 	flow, err := f.Build(ProviderAntigravity)
 	if err != nil {
 		t.Fatalf("Build(antigravity): %v", err)
@@ -172,6 +180,18 @@ func TestFlowFactoryBuildsAntigravityFlow(t *testing.T) {
 	if _, ok := flow.(*oauth.AntigravityFlow); !ok {
 		t.Fatalf("Build(antigravity) = %T, want *oauth.AntigravityFlow", flow)
 	}
+}
+
+// TestFlowFactoryAntigravityWithoutSecretFailsClosed is the security guard: with
+// no client secret supplied, Build must refuse with the typed
+// auth.provider_client_secret_missing code rather than run with a placeholder.
+func TestFlowFactoryAntigravityWithoutSecretFailsClosed(t *testing.T) {
+	f := NewFlowFactory(testDeps())
+	_, err := f.Build(ProviderAntigravity)
+	if err == nil {
+		t.Fatal("Build(antigravity) succeeded without a client secret")
+	}
+	assertCode(t, err, domain.CodeAuthProviderClientSecretMissing)
 }
 
 // TestFlowFactoryRefusalIsDataDriven proves the pending refusal still works when

@@ -1942,6 +1942,9 @@ func TestBuildInjectsEgressPolicyWhenFlowDepsEmpty(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Store.Path = filepath.Join(dir, "heimdall.db")
 	cfg.Store.TokenPath = filepath.Join(dir, "management-token")
+	// Antigravity's flow needs an operator-supplied client secret (it is no
+	// longer hardcoded); provide one so the flow builds.
+	cfg.Providers = []config.ProviderConfig{{ID: "antigravity", ClientSecret: "egress-test-secret"}}
 
 	// Neither Egress nor HTTP: the empty deps must be filled with the policy.
 	deps := oauth.ClientDeps{}

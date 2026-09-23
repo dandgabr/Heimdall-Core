@@ -324,14 +324,16 @@ func parseGateEnvVar(name string) (string, bool) {
 
 // providerEnvFields is the closed set of provider fields addressable via env.
 var providerEnvFields = map[string]string{
-	"ID":             "id",
-	"BASE_URL":       "base_url",
-	"AUTH_HEADER":    "auth_header",
-	"ALLOW_LOOPBACK": "allow_loopback",
-	"TTFT":           "ttft",
-	"IDLE":           "idle",
-	"ENABLED":        "enabled",
-	"MODELS":         "models",
+	"ID":                "id",
+	"BASE_URL":          "base_url",
+	"AUTH_HEADER":       "auth_header",
+	"ALLOW_LOOPBACK":    "allow_loopback",
+	"TTFT":              "ttft",
+	"IDLE":              "idle",
+	"ENABLED":           "enabled",
+	"MODELS":            "models",
+	"CLIENT_SECRET":     "client_secret",
+	"CLIENT_SECRET_ENV": "client_secret_env",
 }
 
 // parseProviderEnvVar recognises HEIMDALL_PROVIDERS_<index>_<FIELD> and returns
@@ -698,6 +700,10 @@ func setProvider(cfg *Config, index int, field, value string) error {
 		p.Enabled = b
 	case "models":
 		p.Models = splitList(value)
+	case "client_secret":
+		p.ClientSecret = value
+	case "client_secret_env":
+		p.ClientSecretEnv = value
 	default:
 		// forward-compatible: ignore unknown provider fields
 	}

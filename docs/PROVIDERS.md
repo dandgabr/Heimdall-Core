@@ -96,20 +96,60 @@ Em `internal/auth/descriptors.go`, declare o descriptor com:
 - `AuthEndpoint`/`TokenEndpoint` (ou `DeviceAuthEndpoint`),
 - `DefaultScopes`, `RedirectAllowlist` (match exato; a porta efêmera é validada
   à parte),
-- `ClientID` e, se o cliente público exigir, `ClientSecret` **com**
-  `RequiresClientSecret: true`. `ClientSecret` é **material público** — o secret
-  do CLI do próprio fornecedor, que ele embute no binário — e por isso vive no
-  descriptor, **não no cofre**: pô-lo no vault lhe daria a proteção de um segredo
-  de usuário e esconderia que não é um.
+- `ClientID` e, se o cliente público exigir, `RequiresClientSecret: true`.
+  **O `ClientSecret` NÃO é embutido no descriptor**: o valor em claro em código
+  é um risco de secret scanning (bloqueia o push no GitHub) e nunca deve ir para
+  o repositório. Quem o fornece é o **operador**, pela config do provedor
+  (`client_secret` ou, preferencialmente, `client_secret_env`) — ver a seção
+  "Segredo de cliente OAuth" abaixo. Sem ele, o fluxo falha fechado com
+  `auth.provider_client_secret_missing`.
 
 O `FlowFactory.Build` escolhe o fluxo:
 
 - `RequiresClientSecret` → `oauth.NewAntigravityFlow` (authorization_code com
-  client_secret + descoberta de projeto/tier + onboarding);
+  client_secret + descoberta de projeto/tier + onboarding), **exigindo** que o
+  segredo tenha sido injetado pelo composition root a partir da config;
 - com `DeviceAuthEndpoint` → `oauth.NewDeviceCodeFlow`;
 - senão → `oauth.NewPKCEFlow`.
 
 E declare o modo `AuthOAuth` em `AuthModesFor`.
+
+### Segredo de cliente OAuth (Antigravity) — fornecido pelo operador
+
+O cliente do CLI do Antigravity é do tipo *confidential*: o token exchange exige
+um `client_secret` além do `client_id`. Esse valor **não acompanha o binário nem
+o repositório**; o operador o obtém do próprio harness oficial (o `client_secret`
+público do CLI, no binário `agy`/no bundle do plugin) e o informa por config. Há
+duas formas, com a **mesma precedência** do resto da config
+(`env > flag > arquivo > default`):
+
+```toml
+[[providers]]
+id            = "antigravity"
+# Opção recomendada: só o NOME da variável vai para o arquivo.
+client_secret_env = "ANTIGRAVITY_CLIENT_SECRET"
+# Alternativa: o valor direto no arquivo (fica legível em disco; prefira o env).
+# client_secret = "<o client secret público do CLI>"
+```
+
+```sh
+# O valor nunca entra no repositório nem no `ps`/histórico:
+export ANTIGRAVITY_CLIENT_SECRET='<o client secret público do CLI>'
+```
+
+Regras:
+
+- **Nunca commitar o valor.** O teste `TestNoCommittedClientSecret`
+  (`internal/auth/secret_scan_test.go`) varre `internal/` e `docs/` e **falha** se
+  encontrar um padrão de client secret (`GOCSPX-`, `ClientSecret: "<literal>"`,
+  `sk-...`) — é o guard que impede a reincidência.
+- **`config show` redige** `providers.<i>.client_secret` (mostra `[REDACTED]`);
+  o `client_secret_env` (nome da variável) é exibido, pois não é segredo. O
+  valor nunca aparece em log.
+- **Sem segredo → falha fechada**: `heimdall login` (próxima fase) e qualquer uso
+  do fluxo falham com `auth.provider_client_secret_missing`, nunca com um
+  placeholder.
+
 
 ### 2. Ocultação por provedor (`Obfuscation`)
 

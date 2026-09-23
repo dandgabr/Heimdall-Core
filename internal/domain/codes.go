@@ -72,6 +72,12 @@ const (
 	// id are still placeholders, so the family must not be activated against the
 	// live service. It is an explicit refusal, not a crash.
 	CodeAuthProviderPending = "auth.provider_pending_endpoints"
+	// CodeAuthProviderClientSecretMissing is returned when a provider's OAuth
+	// flow requires a client secret (e.g. Antigravity's public CLI client) but
+	// none was supplied by config/env. The secret is NEVER hardcoded, so the
+	// flow fails closed with this code instead of running with a placeholder.
+	// Carries {provider}.
+	CodeAuthProviderClientSecretMissing = "auth.provider_client_secret_missing"
 
 	// provider.* — the family registry.
 	CodeProviderNotFound   = "provider.not_found"

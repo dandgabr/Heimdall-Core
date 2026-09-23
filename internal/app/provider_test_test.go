@@ -21,6 +21,12 @@ import (
 	"github.com/dandgabr/heimdall-core/internal/secret"
 )
 
+// testAntigravitySecret is a NON-SECRET placeholder injected into the config so
+// the Antigravity OAuth flow builds in tests. It is deliberately not shaped like
+// a real Google client secret, so it cannot be mistaken for one (and the guard
+// test that scans for real-secret patterns leaves it alone).
+const testAntigravitySecret = "test-only-client-secret-not-real"
+
 // buildProviderApp builds an app whose z.ai provider points at srvURL (loopback,
 // explicitly allowed). No credential is seeded; use seedCredential for that.
 func buildProviderApp(t *testing.T, srvURL string) *App {
@@ -34,6 +40,12 @@ func buildProviderApp(t *testing.T, srvURL string) *App {
 		// flag set is rejected by Config.Validate, which is the point).
 		ID: "z.ai", BaseURL: srvURL, AuthHeader: "bearer",
 		AllowLoopback: strings.HasPrefix(srvURL, "http://127.0.0.1"), Enabled: true,
+	}, {
+		// Antigravity's OAuth flow requires a client secret that is NO LONGER
+		// hardcoded; the operator supplies it. The readiness tests inject one so
+		// the flow builds (the missing-secret fail-closed path is covered
+		// separately). A disabled entry needs no base_url.
+		ID: "antigravity", ClientSecret: testAntigravitySecret,
 	}}
 
 	salt, _ := secret.NewSalt()

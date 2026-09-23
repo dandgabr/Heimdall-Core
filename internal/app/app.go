@@ -375,7 +375,12 @@ func (a *App) wireVault(opts Options) error {
 			flowDeps.Egress = egress.New()
 		}
 	}
-	a.Flows = auth.NewFlowFactory(flowDeps)
+	// The per-provider OAuth client secrets come from config/env, never from a
+	// hardcoded literal (removed for secret-scanning reasons). The factory
+	// fails closed per provider when a required secret is absent; the values
+	// are never logged.
+	clientSecrets := config.ResolveClientSecrets(a.Config.Providers, a.env)
+	a.Flows = auth.NewFlowFactoryWithSecrets(flowDeps, clientSecrets)
 
 	// Build the gate chain with the F1 logger gate. Its sink records metadata
 	// for tests and feeds the structured logger in production; it never sees a

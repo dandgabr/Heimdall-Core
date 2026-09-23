@@ -46,6 +46,7 @@
   "auth.api_key_missing": "No API key was supplied for provider {provider}.",
   "auth.api_key_invalid_format": "The API key for provider {provider} is malformed ({reason}).",
   "auth.provider_pending_endpoints": "Provider {provider} is not activatable yet: {fields} still need to be confirmed. Refusing to start a flow against the live service.",
+  "auth.provider_client_secret_missing": "Provider {provider} requires an OAuth client secret that is not bundled; supply it via the provider's client_secret or client_secret_env configuration.",
   "provider.not_found": "Unknown provider {provider}.",
   "provider.duplicate": "Provider {provider} is already registered.",
   "provider.invalid": "Invalid provider registration: {reason}.",

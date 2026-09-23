@@ -66,6 +66,15 @@ Regras:
 - `ProviderDescriptor.RequiresClientSecret`: o fluxo do Antigravity é
   `authorization_code` **com client_secret** (client público do CLI), não PKCE puro; o
   contrato passa a admitir segredo de cliente quando o descriptor o exigir.
+  **Emenda (2026-09-23):** o `client_secret` **NÃO é embutido no descriptor** — um
+  literal em código é um risco de secret scanning (bloqueou o push no GitHub). O
+  descriptor carrega só `ClientID` (público) e `RequiresClientSecret: true`; o
+  **operador** fornece o segredo via a config do provedor (`client_secret` ou
+  `client_secret_env`, com a precedência normal), e o composition root o injeta no
+  `FlowFactory` (`NewFlowFactoryWithSecrets`). Sem ele, o fluxo **falha fechado**
+  com `auth.provider_client_secret_missing` — nunca um placeholder. `config show`
+  redige o campo; o valor nunca é logado; um teste-guard varre `internal/` e
+  `docs/` contra a reintrodução.
 - A camada de ocultação aumenta a superfície de manutenção: quando o provedor muda o
   fingerprint, o conector quebra (falha explícita, não silenciosa).
 

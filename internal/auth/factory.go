@@ -27,6 +27,13 @@ func PendingFields(provider domain.ProviderID) []string {
 type FlowFactory struct {
 	deps        oauth.ClientDeps
 	descriptors map[domain.ProviderID]contracts.ProviderDescriptor
+	// secrets holds the per-provider OAuth client secrets supplied by the
+	// operator (config/env). They are INJECTED here, never hardcoded in the
+	// descriptors: a secret literal in source is a secret-scanning hazard and
+	// must never ship in the repo (see NewFlowFactoryWithSecrets). A provider
+	// whose descriptor declares RequiresClientSecret and has no entry here
+	// fails closed in Build.
+	secrets map[domain.ProviderID]string
 	// registry maps provider -> allowed auth modes, so a flow is only built for
 	// a mode the provider actually supports.
 	modes map[domain.ProviderID][]contracts.AuthMode
@@ -36,11 +43,31 @@ type FlowFactory struct {
 	pending map[domain.ProviderID][]string
 }
 
-// NewFlowFactory builds the factory over the F1 descriptors.
+// NewFlowFactory builds the factory over the F1 descriptors WITHOUT any OAuth
+// client secrets. A provider that needs one (Antigravity) will fail closed in
+// Build; production uses NewFlowFactoryWithSecrets to inject them from config.
 func NewFlowFactory(deps oauth.ClientDeps) *FlowFactory {
+	return NewFlowFactoryWithSecrets(deps, nil)
+}
+
+// NewFlowFactoryWithSecrets builds the factory and injects the operator-supplied
+// per-provider OAuth client secrets. The secrets come from configuration (a
+// direct value or a named env var), never from a hardcoded literal. A nil/empty
+// map is valid: any provider that requires a secret then fails closed in Build.
+//
+// The map is COPIED, so a later mutation by the caller cannot change what a
+// built flow uses.
+func NewFlowFactoryWithSecrets(deps oauth.ClientDeps, secrets map[domain.ProviderID]string) *FlowFactory {
+	injected := make(map[domain.ProviderID]string, len(secrets))
+	for k, v := range secrets {
+		if v != "" {
+			injected[k] = v
+		}
+	}
 	return &FlowFactory{
 		deps:        deps,
 		descriptors: Descriptors(),
+		secrets:     injected,
 		modes: map[domain.ProviderID][]contracts.AuthMode{
 			ProviderAntigravity: {contracts.AuthOAuth},
 			ProviderZAI:         {contracts.AuthAPIKey},
@@ -99,6 +126,22 @@ func (f *FlowFactory) Build(provider domain.ProviderID) (contracts.AuthFlow, err
 		// onboarding). A device endpoint takes precedence when present,
 		// otherwise the generic PKCE flow.
 		if desc.RequiresClientSecret {
+			secret := f.secrets[provider]
+			if secret == "" {
+				// Fail closed: the secret is not bundled and the operator did
+				// not supply it. Running with a placeholder would send a bogus
+				// client_secret to the provider and fail opaquely; refuse with
+				// a typed, actionable code instead.
+				return nil, domain.New(domain.CodeAuthProviderClientSecretMissing,
+					domain.WithHTTPStatus(400),
+					domain.WithScope(domain.ScopeRequest),
+					domain.WithParams(map[string]string{"provider": string(provider)}),
+				)
+			}
+			// Bind the injected secret onto a COPY of the descriptor, so the
+			// package-level descriptor map is never mutated and a second call
+			// sees the same state.
+			desc.ClientSecret = secret
 			return oauth.NewAntigravityFlow(f.deps, desc, oauth.DefaultAntigravityConfig()), nil
 		}
 		if desc.DeviceAuthEndpoint != "" {

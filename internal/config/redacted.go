@@ -36,6 +36,27 @@ var secretKeys = map[string]bool{
 	"passthrough.api_key": true,
 }
 
+// secretKeySuffixes are dotted-key SUFFIXES that mark a secret value, matched
+// against the per-provider (index-addressed) keys that cannot be listed
+// statically. `providers.<i>.client_secret` is the OAuth client secret; the
+// env NAME form is not a secret and is shown.
+var secretKeySuffixes = []string{
+	".client_secret",
+}
+
+// isSecretKey reports whether a dotted key carries a secret value.
+func isSecretKey(key string) bool {
+	if secretKeys[key] {
+		return true
+	}
+	for _, suffix := range secretKeySuffixes {
+		if strings.HasSuffix(key, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
 // RedactedFieldKeys returns the sorted list of keys RedactedFields will emit,
 // for tests and docs. It is derived from a Defaults() config so an empty map
 // still enumerates the fixed keys.
@@ -53,7 +74,7 @@ func RedactedFieldKeys() []string {
 func RedactedFields(cfg Config, sources Fields) []Field {
 	var out []Field
 	add := func(key, value string) {
-		if secretKeys[key] {
+		if isSecretKey(key) {
 			value = Redacted
 		}
 		out = append(out, Field{Key: key, Value: value, Source: sources.SourceOf(key)})
@@ -125,6 +146,8 @@ func RedactedFields(cfg Config, sources Fields) []Field {
 		addDur(prefix+"idle", p.Idle)
 		addBool(prefix+"enabled", p.Enabled)
 		addList(prefix+"models", p.Models)
+		add(prefix+"client_secret", p.ClientSecret)
+		add(prefix+"client_secret_env", p.ClientSecretEnv)
 	}
 	return out
 }

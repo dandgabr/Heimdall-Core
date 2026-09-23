@@ -92,6 +92,18 @@ type ProviderConfig struct {
 	// (ADR-0001). Empty means the provider declares no models and is not
 	// routable until one is added.
 	Models []string
+	// ClientSecret is the OAuth client secret for a provider whose flow
+	// requires one (Antigravity's public CLI client). It is deliberately NOT
+	// hardcoded in source — a secret literal in the repo is a secret-scanning
+	// hazard (it was removed for exactly that reason). Prefer ClientSecretEnv
+	// so the value never lands in the config file. This field is REDACTED by
+	// `config show` and never logged.
+	ClientSecret string
+	// ClientSecretEnv NAMES the environment variable holding the client secret,
+	// mirroring passthrough.api_key_env. It is the recommended form: the config
+	// file records only the variable name. When both are set the direct
+	// ClientSecret wins.
+	ClientSecretEnv string
 }
 
 // Server holds the HTTP listener settings.
@@ -151,6 +163,39 @@ func (s Server) IsLoopback() bool {
 		return false
 	}
 	return ip.IsLoopback()
+}
+
+// ResolveClientSecret returns the OAuth client secret for this provider: the
+// direct value, else the named env var's value, else "". It mirrors
+// Passthrough.Resolve: env is the injected snapshot so tests are hermetic.
+//
+// The value is a SECRET: the caller must never log it or place it in an error,
+// and `config show` redacts the direct field.
+func (p ProviderConfig) ResolveClientSecret(env map[string]string) string {
+	if p.ClientSecret != "" {
+		return p.ClientSecret
+	}
+	if p.ClientSecretEnv != "" {
+		return env[p.ClientSecretEnv]
+	}
+	return ""
+}
+
+// ResolveClientSecrets maps every configured provider that declares a client
+// secret (direct or via env) to its resolved value. It is what the composition
+// root injects into the OAuth flow factory. A provider with no secret is simply
+// absent from the map.
+func ResolveClientSecrets(providers []ProviderConfig, env map[string]string) map[domain.ProviderID]string {
+	out := map[domain.ProviderID]string{}
+	for _, p := range providers {
+		if strings.TrimSpace(p.ID) == "" {
+			continue
+		}
+		if s := p.ResolveClientSecret(env); s != "" {
+			out[domain.ProviderID(p.ID)] = s
+		}
+	}
+	return out
 }
 
 // Security holds the F5.1 HTTP trust settings (ADR-SEC-06): client-key
@@ -573,6 +618,17 @@ func validateProviders(list []ProviderConfig) error {
 		if !validAuthHeaders[p.AuthHeader] {
 			return configProviderError("invalid auth_header",
 				map[string]string{"id": p.ID, "value": p.AuthHeader})
+		}
+		// client_secret_env NAMES a variable: an empty/whitespace name is a
+		// typo that would silently resolve to no secret and fail the OAuth flow
+		// closed at runtime. Refuse it at load, where the operator can see it.
+		if p.ClientSecretEnv != "" && strings.TrimSpace(p.ClientSecretEnv) == "" {
+			return configProviderError("client_secret_env must name a variable",
+				map[string]string{"id": p.ID})
+		}
+		if strings.ContainsAny(p.ClientSecretEnv, " \t") {
+			return configProviderError("client_secret_env must not contain whitespace",
+				map[string]string{"id": p.ID, "value": p.ClientSecretEnv})
 		}
 		if p.Enabled && strings.TrimSpace(p.BaseURL) == "" {
 			return configProviderError("enabled provider has no base_url",

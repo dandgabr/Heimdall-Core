@@ -46,6 +46,7 @@
   "auth.api_key_missing": "Nenhuma chave de API foi fornecida para o provedor {provider}.",
   "auth.api_key_invalid_format": "A chave de API do provedor {provider} está malformada ({reason}).",
   "auth.provider_pending_endpoints": "O provedor {provider} ainda não é ativável: {fields} aguardam confirmação. Recusando iniciar um fluxo contra o serviço real.",
+  "auth.provider_client_secret_missing": "O provedor {provider} exige um client secret OAuth que não é embutido; forneça-o via a configuração client_secret ou client_secret_env do provedor.",
   "provider.not_found": "Provedor desconhecido: {provider}.",
   "provider.duplicate": "O provedor {provider} já está registrado.",
   "provider.invalid": "Registro de provedor inválido: {reason}.",

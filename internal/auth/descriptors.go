@@ -50,10 +50,14 @@ func Descriptors() map[domain.ProviderID]contracts.ProviderDescriptor {
 			// The loopback callback allowlist is the stable URI; the ephemeral
 			// port is validated by the bind.
 			RedirectAllowlist: []string{"http://127.0.0.1/callback"},
-			// The PUBLIC client id/secret embedded in the vendor CLI (ADR-0003):
-			// not user secrets, shipped in the binary by construction.
+			// The PUBLIC client id embedded in the vendor CLI (ADR-0003). The
+			// matching client SECRET is deliberately NOT hardcoded here: a
+			// secret literal in the source is a secret-scanning hazard and must
+			// never ship in the repo. The operator supplies it via the
+			// provider's `client_secret` / `client_secret_env` config, and the
+			// composition root injects it (see NewFlowFactoryWithSecrets). With
+			// no secret the Antigravity flow fails closed.
 			ClientID:             "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com",
-			ClientSecret:         "REDACTED_CLIENT_SECRET",
 			RequiresClientSecret: true,
 			Obfuscation:          antigravityObfuscation(),
 			RiskNotice:           "provider.risk_notice.antigravity",
