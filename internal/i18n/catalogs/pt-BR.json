@@ -58,6 +58,7 @@
   "route.depth_exceeded": "O combo {name} excede a profundidade máxima de referência ({max}).",
   "route.fanout_exceeded": "O combo {name} pede um fan-out acima do teto ({max}).",
   "route.unknown_provider": "O combo {name} referencia um provedor desconhecido {provider}.",
+  "route.unknown_model": "O combo {name} referencia o modelo {model}, que nenhum provedor registrado declara.",
   "route.no_candidate": "Nenhum candidato de rota atende à requisição.",
   "quota.exhausted": "A cota da credencial está esgotada até reiniciar a janela.",
   "quota.rate_limited": "A credencial está limitada por taxa.",

@@ -131,6 +131,11 @@ const (
 	CodeRouteFanoutExceeded  = "route.fanout_exceeded"
 	CodeRouteUnknownProvider = "route.unknown_provider"
 	CodeRouteNoCandidate     = "route.no_candidate"
+	// CodeRouteUnknownModel is returned when a combo's `model` step names a
+	// model that no registered provider declares. It is DELIBERATELY distinct
+	// from route.unknown_provider: a typo in a model id is not an unknown
+	// provider, and conflating the two produced a misleading operator message.
+	CodeRouteUnknownModel = "route.unknown_model"
 	// CodeRouteFusionSelfJudge is returned when a fusion combo's judge resolves
 	// to the fusion combo itself: that is infinite recursion and is refused
 	// (ADR-0009 §3).

@@ -779,21 +779,27 @@ func newComboCmd() *cobra.Command {
 //	combo:base
 //	model:glm-4.6:5      (weight 5 for `weighted`)
 //
-// The kind is one of model|provider|combo. This is deliberately a small,
-// scriptable grammar; the GUI/TOML combo authoring is a later phase.
+// The kind is one of model|provider|combo. The reference may itself contain
+// ':' — Ollama model ids are `name:tag` (`gpt-oss:120b`) — so the weight is the
+// LAST segment ONLY when it is a positive integer AND a non-empty reference
+// remains before it; otherwise the whole remainder after the first ':' is the
+// reference. Concretely:
+//
+//	model:gpt-oss:120b   -> ref "gpt-oss:120b"
+//	model:glm-4.6:5      -> ref "glm-4.6", weight 5
+//	provider:z.ai        -> ref "z.ai"
+//
+// This is deliberately a small, scriptable grammar; the GUI/TOML combo
+// authoring is a later phase.
 func parseComboSteps(raw []string) ([]combos.Step, error) {
 	steps := make([]combos.Step, 0, len(raw))
 	for _, item := range raw {
-		parts := strings.Split(item, ":")
-		if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
-			return nil, domain.New(domain.CodeRouteInvalidCombo,
-				domain.WithHTTPStatus(400),
-				domain.WithScope(domain.ScopeRequest),
-				domain.WithParams(map[string]string{"name": item, "reason": "step must be kind:ref[:weight]"}),
-			)
+		kind, rest, ok := strings.Cut(item, ":")
+		if !ok || kind == "" {
+			return nil, invalidStep(item, "step must be kind:ref[:weight]")
 		}
-		step := combos.Step{Ref: parts[1]}
-		switch parts[0] {
+		step := combos.Step{}
+		switch kind {
 		case "model":
 			step.Kind = combos.StepModel
 		case "provider":
@@ -801,26 +807,52 @@ func parseComboSteps(raw []string) ([]combos.Step, error) {
 		case "combo":
 			step.Kind = combos.StepComboRef
 		default:
-			return nil, domain.New(domain.CodeRouteInvalidCombo,
-				domain.WithHTTPStatus(400),
-				domain.WithScope(domain.ScopeRequest),
-				domain.WithParams(map[string]string{"name": item, "reason": "unknown step kind " + parts[0]}),
-			)
+			return nil, invalidStep(item, "unknown step kind "+kind)
 		}
-		if len(parts) >= 3 && parts[2] != "" {
-			w, err := strconv.Atoi(parts[2])
-			if err != nil {
-				return nil, domain.New(domain.CodeRouteInvalidCombo,
-					domain.WithHTTPStatus(400),
-					domain.WithScope(domain.ScopeRequest),
-					domain.WithParams(map[string]string{"name": item, "reason": "weight is not an integer"}),
-				)
-			}
-			step.Weight = w
+		ref, weight, hasWeight := splitStepRef(rest)
+		if ref == "" {
+			return nil, invalidStep(item, "step must be kind:ref[:weight]")
+		}
+		step.Ref = ref
+		if hasWeight {
+			step.Weight = weight
 		}
 		steps = append(steps, step)
 	}
 	return steps, nil
+}
+
+// splitStepRef splits the part of a step after `kind:` into the reference and an
+// optional trailing weight. The weight is the LAST ':'-segment ONLY when it is a
+// positive integer and a non-empty reference remains before it; otherwise the
+// whole string is the reference (so `gpt-oss:120b` keeps its tag). A returned
+// hasWeight=false means "no weight" (weight defaults to 1, ADR-0009 §2).
+func splitStepRef(rest string) (ref string, weight int, hasWeight bool) {
+	i := strings.LastIndex(rest, ":")
+	if i <= 0 {
+		// No ':', or a leading ':' (an empty ref): the whole string is the ref.
+		return rest, 0, false
+	}
+	last := rest[i+1:]
+	if last == "" {
+		return rest, 0, false
+	}
+	w, err := strconv.Atoi(last)
+	if err != nil || w <= 0 {
+		// Not a positive integer: everything (including the ':' and the tag) is
+		// part of the reference.
+		return rest, 0, false
+	}
+	return rest[:i], w, true
+}
+
+// invalidStep builds the route.invalid_combo error for a malformed step.
+func invalidStep(item, reason string) error {
+	return domain.New(domain.CodeRouteInvalidCombo,
+		domain.WithHTTPStatus(400),
+		domain.WithScope(domain.ScopeRequest),
+		domain.WithParams(map[string]string{"name": item, "reason": reason}),
+	)
 }
 
 func newComboCreateCmd() *cobra.Command {
@@ -834,7 +866,13 @@ func newComboCreateCmd() *cobra.Command {
 		Long: "Create a named combo.\n\n" +
 			"Each step has the form `kind:ref[:weight]`, where kind is one of\n" +
 			"model|provider|combo:\n\n" +
-			"    heimdall combo create fast model:glm-4.6 provider:z.ai --strategy fallback",
+			"    heimdall combo create fast model:glm-4.6 provider:z.ai --strategy fallback\n\n" +
+			"The reference may itself contain ':' (Ollama model ids are `name:tag`). The\n" +
+			"weight is the LAST segment only when it is a positive integer and a ref\n" +
+			"remains before it; otherwise the whole remainder is the reference:\n\n" +
+			"    model:gpt-oss:120b   -> ref \"gpt-oss:120b\"\n" +
+			"    model:glm-4.6:5      -> ref \"glm-4.6\", weight 5\n" +
+			"    provider:z.ai        -> ref \"z.ai\"",
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			instance, err := buildReadOnly(configPath)

@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/dandgabr/heimdall-core/internal/combos"
 	"github.com/dandgabr/heimdall-core/internal/store"
 )
 
@@ -130,11 +132,89 @@ func TestComboCreateRejectsBadStrategy(t *testing.T) {
 	}
 }
 
-// TestComboCreateRejectsBadWeight covers the weight parse branch.
-func TestComboCreateRejectsBadWeight(t *testing.T) {
-	cfg := setupComboCLI(t)
-	if code, _ := runComboErr(t, "combo", "create", "bad", "provider:z.ai:notanint", "--strategy", "weighted", "--config", cfg); code == 0 {
-		t.Fatal("a non-integer weight was accepted")
+// TestComboCreateColonRefEndToEnd is the G-2 regression: a model id with a ':'
+// (Ollama's `name:tag`) is stored as ONE step with the tag intact, and a
+// trailing integer after the tag-less ref is the weight. The config declares the
+// provider and its models so the save-time allowlist accepts the targets.
+func TestComboCreateColonRefEndToEnd(t *testing.T) {
+	cfg := setupComboCLIConfigured(t)
+
+	var out strings.Builder
+	if code := executeToWithStdout(&out, []string{
+		"combo", "create", "oc", "model:gpt-oss:120b", "model:glm-4.6:5",
+		"--strategy", "weighted", "--config", cfg,
+	}); code != 0 {
+		t.Fatalf("create exit=%d: %s", code, out.String())
+	}
+
+	// Read the persisted combo back through the store to assert the parsed refs.
+	instance, err := buildReadOnly(cfg)
+	if err != nil {
+		t.Fatalf("buildReadOnly: %v", err)
+	}
+	defer func() { _ = instance.Close() }()
+	combo, err := instance.Combos.Get(context.Background(), "oc")
+	if err != nil {
+		t.Fatalf("Combos.Get: %v", err)
+	}
+	if len(combo.Steps) != 2 {
+		t.Fatalf("steps = %d, want 2: %+v", len(combo.Steps), combo.Steps)
+	}
+	if combo.Steps[0].Ref != "gpt-oss:120b" || combo.Steps[0].Weight != 0 {
+		t.Errorf("step0 = %+v, want ref gpt-oss:120b weight 0", combo.Steps[0])
+	}
+	if combo.Steps[1].Ref != "glm-4.6" || combo.Steps[1].Weight != 5 {
+		t.Errorf("step1 = %+v, want ref glm-4.6 weight 5", combo.Steps[1])
+	}
+}
+
+// setupComboCLIConfigured is setupComboCLI plus a provider with declared models,
+// so a model step passes the save-time allowlist.
+func setupComboCLIConfigured(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	keyDir := filepath.Join(dir, "heimdall")
+	if err := os.MkdirAll(keyDir, 0o700); err != nil {
+		t.Fatalf("mkdir key dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(keyDir, "master-key"), []byte("combo-cli-material"), 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+	cfg := filepath.Join(dir, "heimdall.toml")
+	body := "config_version = 1\n" +
+		"[store]\npath = \"" + filepath.Join(dir, "heimdall.db") + "\"\n" +
+		"token_path = \"" + filepath.Join(dir, "management-token") + "\"\n" +
+		"[[providers]]\nid = \"ollama-cloud\"\nbase_url = \"https://ollama.com/v1\"\n" +
+		"enabled = true\nmodels = [\"gpt-oss:120b\"]\n" +
+		"[[providers]]\nid = \"z.ai\"\nbase_url = \"https://api.z.ai/api/paas/v4\"\n" +
+		"enabled = true\nmodels = [\"glm-4.6\"]\n"
+	if err := os.WriteFile(cfg, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_DATA_HOME", dir)
+	t.Setenv("LC_ALL", "C")
+	return cfg
+}
+
+// TestComboCreateUnknownModelErrorDistinctFromProvider is the G-3 regression: an
+// unknown MODEL reports route.unknown_model (not route.unknown_provider), and an
+// unknown PROVIDER still reports route.unknown_provider. The two causes no
+// longer share a misleading message.
+func TestComboCreateUnknownModelErrorDistinctFromProvider(t *testing.T) {
+	cfg := setupComboCLIConfigured(t)
+
+	_, stderr := runComboErr(t, "combo", "create", "m", "model:glm-5.3", "--config", cfg)
+	if !strings.Contains(stderr, "references model") {
+		t.Fatalf("unknown-model stderr = %q, want the route.unknown_model message", stderr)
+	}
+	if strings.Contains(stderr, "references an unknown provider") {
+		t.Fatalf("unknown-model stderr = %q, misleadingly reported as an unknown provider", stderr)
+	}
+
+	_, stderr = runComboErr(t, "combo", "create", "p", "provider:ghost", "--config", cfg)
+	if !strings.Contains(stderr, "references an unknown provider") {
+		t.Fatalf("unknown-provider stderr = %q, want the route.unknown_provider message", stderr)
 	}
 }
 
@@ -254,5 +334,47 @@ func TestParseComboStepsUnits(t *testing.T) {
 	}
 	if _, err := parseComboSteps([]string{":ref"}); err == nil {
 		t.Fatal("parseComboSteps accepted an empty kind")
+	}
+	if _, err := parseComboSteps([]string{"model:"}); err == nil {
+		t.Fatal("parseComboSteps accepted an empty reference")
+	}
+}
+
+// TestParseComboStepsColonInRef pins the grammar fix (G-2): a model id that
+// itself contains ':' (Ollama's `name:tag`) keeps its tag. The weight is the
+// LAST segment ONLY when it is a positive integer and a ref remains before it.
+func TestParseComboStepsColonInRef(t *testing.T) {
+	cases := []struct {
+		item       string
+		wantKind   combos.StepKind
+		wantRef    string
+		wantWeight int
+	}{
+		{"model:gpt-oss:120b", combos.StepModel, "gpt-oss:120b", 0},
+		{"model:mistral-large-3:675b", combos.StepModel, "mistral-large-3:675b", 0},
+		{"model:glm-4.6:5", combos.StepModel, "glm-4.6", 5},
+		{"provider:z.ai", combos.StepProviderWildcard, "z.ai", 0},
+		{"model:glm-5:5", combos.StepModel, "glm-5", 5},
+		// A trailing non-integer is part of the ref, not an error.
+		{"model:weird:tag", combos.StepModel, "weird:tag", 0},
+		// A non-positive trailing integer is part of the ref, not a weight.
+		{"model:x:0", combos.StepModel, "x:0", 0},
+		// A trailing ':' (empty last segment) is part of the ref, not a weight.
+		{"model:x:", combos.StepModel, "x:", 0},
+	}
+	for _, c := range cases {
+		steps, err := parseComboSteps([]string{c.item})
+		if err != nil {
+			t.Errorf("parseComboSteps(%q): %v", c.item, err)
+			continue
+		}
+		if len(steps) != 1 {
+			t.Errorf("parseComboSteps(%q) = %d steps, want 1", c.item, len(steps))
+			continue
+		}
+		if steps[0].Kind != c.wantKind || steps[0].Ref != c.wantRef || steps[0].Weight != c.wantWeight {
+			t.Errorf("parseComboSteps(%q) = {kind:%s ref:%q weight:%d}, want {kind:%s ref:%q weight:%d}",
+				c.item, steps[0].Kind, steps[0].Ref, steps[0].Weight, c.wantKind, c.wantRef, c.wantWeight)
+		}
 	}
 }

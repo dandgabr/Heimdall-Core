@@ -39,9 +39,12 @@ O que **não** funciona nesta build, dito sem rodeio:
   memória é **FTS5-only** (retrieval lexical). É a dívida **M-1** em
   [`docs/SECURITY-DEBT.md`](docs/SECURITY-DEBT.md); o modo vetorial degrada para
   FTS5 sem falhar o boot.
-- **`GET /v1/models` devolve uma lista vazia.** A rota existe e responde no
-  envelope OpenAI, mas o catálogo servido por ela ainda não é populado a partir
-  do registry.
+
+`GET /v1/models` lista os modelos declarados em `[[providers]].models` dos
+provedores **habilitados** (`owned_by` = id do provedor), no envelope OpenAI. É
+credencial-independente de propósito: descoberta é por declaração; a prontidão
+(credencial utilizável) é do `provider status`. Um provedor desabilitado não
+anuncia modelos.
 
 ### Medições desta build
 
@@ -215,9 +218,16 @@ como as credenciais, e mudam em runtime.
 ```
 
 Cada passo é `kind:ref[:weight]`, com `kind` em `model` | `provider` | `combo`.
-O `--strategy` é uma das dez do registry: `priority`, `fallback`,
+O `ref` pode conter `:` (ids do Ollama são `nome:tag`): o `weight` é o **último**
+segmento apenas quando é um inteiro positivo e sobra um ref antes dele; caso
+contrário, tudo após o primeiro `:` é o ref — `model:gpt-oss:120b` → ref
+`gpt-oss:120b`, `model:glm-4.6:5` → ref `glm-4.6` com weight 5. O `--strategy`
+é uma das dez do registry: `priority`, `fallback`,
 `round-robin`, `weighted`, `fill-first`, `cost`, `p2c`, `fusion`, `pipeline`,
-`auto`. A validação rejeita ciclo no save e aplica um cap de profundidade. O
+`auto`. A validação rejeita ciclo no save e aplica um cap de profundidade. Um
+`model` que nenhum provedor registrado declara é recusado com
+`route.unknown_model` (distinto de `route.unknown_provider`, que é só para um
+provedor desconhecido). O
 cursor de rotação (round-robin) é estado em memória e reinicia com o processo;
 só a política é durável.
 

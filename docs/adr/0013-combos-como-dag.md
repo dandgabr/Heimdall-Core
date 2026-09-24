@@ -89,7 +89,11 @@ request deve custar apenas o `Resolve`. O save recusa com erro tipado:
    recusado (`route.fanout_exceeded`), coerente com a ADR-0009 §3 — evita que a
    reentrância do juiz exploda.
 6. **Allowlist de provedores:** todo `model`/`provider-wildcard` aponta para um
-   provider conhecido no registry (`route.unknown_provider`). Alinhado ao
+   destino válido. Um `provider-wildcard` para um provedor fora do registry é
+   `route.unknown_provider`; um `model` que nenhum provedor registrado declara é
+   `route.unknown_model` — codes **distintos** porque a causa é distinta (um
+   provedor desconhecido vs. um id de modelo não declarado) e um único code
+   produzia uma mensagem enganosa ("provedor desconhecido glm-5.3"). Alinhado ao
    `reroute` em allowlist (SEC-10); o combo **não** pode introduzir um destino
    fora do registry.
 7. **Capability-aware (no resolve, não no save):** o Router pode **reordenar** os
@@ -149,8 +153,8 @@ já existe para o caso "dispatcher de validação ainda não existe" (F3 o imple
 
 Nomeados aqui para o implementador não inventar strings: `route.invalid_combo`,
 `route.cyclic_combo`, `route.depth_exceeded`, `route.fanout_exceeded`,
-`route.unknown_provider`, `route.no_candidate` (ADR-0009 §7). Entram no catálogo
-`pt-BR`/`en` na F3.
+`route.unknown_provider`, `route.unknown_model`, `route.no_candidate`
+(ADR-0009 §7). Entram no catálogo `pt-BR`/`en` na F3.
 
 ## Consequências
 

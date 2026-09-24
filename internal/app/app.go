@@ -487,6 +487,33 @@ func familyModels(models []string) map[domain.ModelID]providers.ModelCapabilitie
 	return out
 }
 
+// modelCatalog builds the GET /v1/models catalog from the ENABLED providers and
+// the models they declare in `[[providers]].models`. It is credential-independent
+// on purpose: discovery is by declaration, while readiness (a usable credential)
+// is the `provider status` concern, not the catalog's. Only providers the
+// operator marked `enabled = true` are listed, so a declared-but-off upstream
+// does not advertise models the router will not route. The order is
+// deterministic (provider id, then declared model).
+func (a *App) modelCatalog() openai.Catalog {
+	enabled := make(map[domain.ProviderID]bool, len(a.Config.Providers))
+	for _, pc := range a.Config.Providers {
+		if pc.Enabled {
+			enabled[domain.ProviderID(pc.ID)] = true
+		}
+	}
+	catalog := providers.NewCatalog(a.Providers)
+	var out []openai.Model
+	for _, id := range a.Providers.IDs() {
+		if !enabled[id] {
+			continue
+		}
+		for _, model := range catalog.Models(id) {
+			out = append(out, openai.Model{ID: string(model), Owner: string(id)})
+		}
+	}
+	return openai.StaticCatalog(out)
+}
+
 // buildFamily constructs the ProviderFamily for a descriptor, branching on the
 // PROTOCOL (ADR-0010 wiring / BD-02): WireCloudCode gets the CloudCode family
 // (the Antigravity connector), every other dialect gets the OpenAI-compatible
@@ -1435,7 +1462,7 @@ var _ contracts.CredentialStore = (*store.CredentialStore)(nil)
 func (a *App) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	openai.New(a.Bundle).Register(mux)
+	openai.New(a.Bundle, a.modelCatalog()).Register(mux)
 	// The embedded management GUI (a Svelte SPA) is served from the same mux
 	// under /web/, so it inherits the catch-all LocalOnly and HostGuard guards
 	// by construction (ADR-SEC-06). It is a READ-class asset surface: the

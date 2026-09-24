@@ -58,6 +58,7 @@
   "route.depth_exceeded": "Combo {name} exceeds the maximum reference depth ({max}).",
   "route.fanout_exceeded": "Combo {name} requests a fan-out above the cap ({max}).",
   "route.unknown_provider": "Combo {name} references an unknown provider {provider}.",
+  "route.unknown_model": "Combo {name} references model {model}, which no registered provider declares.",
   "route.no_candidate": "No route candidate satisfies the request.",
   "quota.exhausted": "The credential's quota is exhausted until it resets.",
   "quota.rate_limited": "The credential is rate limited.",

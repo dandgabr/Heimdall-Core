@@ -59,12 +59,26 @@ func fanoutExceeded(name string) error {
 	)
 }
 
-// unknownProvider builds a route.unknown_provider error.
+// unknownProvider builds a route.unknown_provider error. It is for a PROVIDER
+// target (a provider wildcard) that is not in the registry: the provider id
+// itself is unknown.
 func unknownProvider(name, provider string) error {
 	return domain.New(domain.CodeRouteUnknownProvider,
 		domain.WithHTTPStatus(400),
 		domain.WithScope(domain.ScopeRequest),
 		domain.WithParams(map[string]string{"name": name, "provider": provider}),
+	)
+}
+
+// unknownModel builds a route.unknown_model error. It is for a MODEL target no
+// registered provider declares: the provider namespace is irrelevant, the model
+// id is the problem (e.g. a typo). Keeping it distinct from unknown_provider is
+// what makes the operator message honest.
+func unknownModel(name, model string) error {
+	return domain.New(domain.CodeRouteUnknownModel,
+		domain.WithHTTPStatus(400),
+		domain.WithScope(domain.ScopeRequest),
+		domain.WithParams(map[string]string{"name": name, "model": model}),
 	)
 }
 
@@ -116,7 +130,7 @@ func ValidateGraph(c Combo, existing map[domain.ComboID]Combo, providers Provide
 				}
 			case StepModel:
 				if !providers.DeclaresModel(domain.ModelID(s.Ref)) {
-					return 0, unknownProvider(c.Name, s.Ref)
+					return 0, unknownModel(c.Name, s.Ref)
 				}
 			}
 		}

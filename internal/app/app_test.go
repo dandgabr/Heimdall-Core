@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
@@ -96,6 +97,75 @@ func TestHealthAndModels(t *testing.T) {
 			t.Errorf("body = %s", rec.Body.String())
 		}
 	})
+}
+
+// TestModelsCatalogListsEnabledProviders is the G-1 regression: GET /v1/models
+// lists the declared models of the ENABLED providers (never empty when a
+// provider is configured), in the OpenAI model shape with owned_by = provider.
+// A declared-but-disabled provider contributes nothing.
+func TestModelsCatalogListsEnabledProviders(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Store.Path = filepath.Join(dir, "heimdall.db")
+	cfg.Store.TokenPath = filepath.Join(dir, "management-token")
+	cfg.Providers = []config.ProviderConfig{
+		{ID: "ollama-cloud", BaseURL: "https://ollama.com/v1", Enabled: true, Models: []string{"gpt-oss:120b", "mistral-large-3:675b"}},
+		{ID: "z.ai", BaseURL: "https://api.z.ai/api/paas/v4", Enabled: true, Models: []string{"glm-4.6"}},
+		{ID: "command-code", BaseURL: "https://api.commandcode.ai", Enabled: false, Models: []string{"hidden-model"}},
+	}
+	a, err := Build(Options{Config: cfg, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer func() { _ = a.Close() }()
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Host = "127.0.0.1"
+	rec := httptest.NewRecorder()
+	a.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	var body struct {
+		Object string `json:"object"`
+		Data   []struct {
+			ID      string `json:"id"`
+			Object  string `json:"object"`
+			OwnedBy string `json:"owned_by"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("body is not JSON: %v (%s)", err, rec.Body.String())
+	}
+	if body.Object != "list" {
+		t.Errorf("object = %q, want list", body.Object)
+	}
+	want := map[string]string{
+		"gpt-oss:120b":         "ollama-cloud",
+		"mistral-large-3:675b": "ollama-cloud",
+		"glm-4.6":              "z.ai",
+	}
+	if len(body.Data) != len(want) {
+		t.Fatalf("data = %+v, want %d entries", body.Data, len(want))
+	}
+	for _, m := range body.Data {
+		if m.Object != "model" {
+			t.Errorf("model %s object = %q, want model", m.ID, m.Object)
+		}
+		if want[m.ID] != m.OwnedBy {
+			t.Errorf("model %s owned_by = %q, want %q", m.ID, m.OwnedBy, want[m.ID])
+		}
+	}
+	if strings.Contains(rec.Body.String(), "hidden-model") {
+		t.Errorf("a disabled provider's model was advertised: %s", rec.Body.String())
+	}
+	// Deterministic order: providers sorted by id (ollama-cloud before z.ai),
+	// then models sorted within a provider.
+	if body.Data[0].OwnedBy != "ollama-cloud" || body.Data[len(body.Data)-1].OwnedBy != "z.ai" {
+		t.Errorf("catalog order = %+v, want ollama-cloud entries before z.ai", body.Data)
+	}
 }
 
 func TestMgmtPingRequiresToken(t *testing.T) {

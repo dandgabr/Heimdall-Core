@@ -202,9 +202,17 @@ func TestValidateGraphProviderAllowlist(t *testing.T) {
 	badWildcard := NewCombo("w", contracts.StrategyFallback, []Step{{Kind: StepProviderWildcard, Ref: "ghost"}})
 	assertCode(t, mustErr(ValidateGraph(badWildcard, nil, providers)), domain.CodeRouteUnknownProvider)
 
-	// Unknown model (DeclaresModel false).
+	// Unknown model (DeclaresModel false) is its OWN code, not unknown_provider:
+	// conflating the two produced a misleading "unknown provider <model>".
 	badModel := NewCombo("m", contracts.StrategyFallback, []Step{{Kind: StepModel, Ref: "ghost"}})
-	assertCode(t, mustErr(ValidateGraph(badModel, nil, providers)), domain.CodeRouteUnknownProvider)
+	assertCode(t, mustErr(ValidateGraph(badModel, nil, providers)), domain.CodeRouteUnknownModel)
+
+	// A KNOWN model is fine.
+	goodModel := NewCombo("m", contracts.StrategyFallback, []Step{{Kind: StepModel, Ref: "m"}})
+	knownModel := fakeProviders{known: map[domain.ProviderID]bool{"z.ai": true}, models: map[domain.ModelID]bool{"m": true}}
+	if _, err := ValidateGraph(goodModel, nil, knownModel); err != nil {
+		t.Fatalf("known model rejected: %v", err)
+	}
 
 	// Known provider wildcard is fine.
 	goodWildcard := NewCombo("w", contracts.StrategyFallback, []Step{{Kind: StepProviderWildcard, Ref: "z.ai"}})
